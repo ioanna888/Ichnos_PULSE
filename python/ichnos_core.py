@@ -1,0 +1,558 @@
+"""ICHNOS — the merge core. Reads the separate SBML submodels and combines
+them IN MEMORY (name-based matching, never id-based — see the GUID history
+in the config docstring). This is the part that actually produces the merged
+model; everything else supports or inspects it."""
+
+import os
+
+import libsbml
+
+from ichnos_config import (
+    TIP_TETR_MODEL, REPORTER_MODEL, TIP_TETR_MODEL_ALT_CHECK, VARIANTS,
+    SHARED_PARAM_NAMES, SHARED_PARAM_TOLERANCE,
+)
+from ichnos_diagnostics import (
+    check_for_stale_duplicate, check_unruled_variable_parameters,
+    print_shared_parameter_summary, check_missing_units,
+)
+from ichnos_io import save_merged_sbml
+
+
+# ---------------------------------------------------------------------------
+# UNITS
+# ---------------------------------------------------------------------------
+# The submodels were exported by different COPASI/SimBiology sessions, so the
+# SAME physical unit can appear under different ids: e.g. the TIP_TetR model
+# calls nanomole/liter "MWDERIVEDUNIT_nanomole__liter", while the sensing and
+# reporter modules call the identical unit
+# "MWBUILTINPREFIX_nano_MWBUILTINUNIT_molarity". This map points each such
+# source id at the destination's equivalent, so merged parameters/species all
+# reference ONE canonical unit definition rather than accumulating duplicates.
+# Verified with libsbml.UnitDefinition.areEquivalent (dimensional
+# equivalence) that each pair below is the same physical unit.
+UNIT_ALIASES = {
+    "MWBUILTINPREFIX_nano_MWBUILTINUNIT_molarity": "MWDERIVEDUNIT_nanomole__liter",
+    "MWDERIVEDUNIT_nanomolarity_liter":            "MWDERIVEDUNIT_nanomole__liter_liter",
+    "MWDERIVEDUNIT_nanomolarity__hour":            "MWDERIVEDUNIT_nanomole__liter__hour",
+}
+
+
+def copy_unit_definition(dest_model, unit_def, new_id=None):
+    """Deep-copies a UnitDefinition into dest_model under new_id (or its own id)."""
+    ud = dest_model.createUnitDefinition()
+    ud.setId(new_id or unit_def.getId())
+    if unit_def.isSetName():
+        ud.setName(unit_def.getName())
+    for i in range(unit_def.getNumUnits()):
+        u_src = unit_def.getUnit(i)
+        u = ud.createUnit()
+        u.setKind(u_src.getKind())
+        u.setExponent(u_src.getExponent())
+        u.setScale(u_src.getScale())
+        u.setMultiplier(u_src.getMultiplier())
+    return ud
+
+
+def plan_unit_renames(dest_model, src_model, prefix):
+    """Decides, for every UnitDefinition in src_model, what id it should use
+    in the merged (dest) model, and which ones need to actually be created.
+
+    Returns (rename_map, needs_creation):
+      rename_map[src_id]  -> the id to use in dest (may be an alias target,
+                             the same id, or unchanged-on-collision)
+      needs_creation      -> set of src ids whose definition must be copied in
+
+    Uses areEquivalent (dimensional equivalence), NOT areIdentical: these
+    tools export the same physical unit with cosmetically different internal
+    representations (extra dimensionless factors, ordering), so areIdentical
+    gives false-negatives even for units that are obviously the same, like
+    'liter'. areEquivalent compares actual dimensions, which is what matters.
+    """
+    rename_map, needs_creation = {}, set()
+    for ud in src_model.getListOfUnitDefinitions():
+        uid = ud.getId()
+        if uid in UNIT_ALIASES:
+            rename_map[uid] = UNIT_ALIASES[uid]       # canonical equivalent in dest
+            continue
+        existing = dest_model.getUnitDefinition(uid)
+        if existing is None:
+            rename_map[uid] = uid
+            needs_creation.add(uid)                   # genuinely new (e.g. micromolarity)
+        elif libsbml.UnitDefinition.areEquivalent(existing, ud):
+            rename_map[uid] = uid                     # same id, same dimension -> reuse
+        else:
+            print(f"  [!] UNIT COLLISION: '{uid}' from {prefix} has the same id but a "
+                  f"DIMENSIONALLY DIFFERENT definition. Not copied; references keep the "
+                  f"destination's version.")
+            rename_map[uid] = uid
+    return rename_map, needs_creation
+
+
+def load_model_or_fail(path):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Δεν βρέθηκε το αρχείο: {path}\n"
+            f"  (working directory: {os.getcwd()})\n"
+            f"  Έλεγξε ότι το path είναι σωστό/απόλυτο, ή ότι τρέχεις το script "
+            f"απ' τον σωστό φάκελο."
+        )
+    doc = libsbml.readSBMLFromFile(path)
+    model = doc.getModel()
+    if model is None:
+        errs = "\n".join(doc.getError(i).getMessage() for i in range(doc.getNumErrors()))
+        raise ValueError(
+            f"Το αρχείο βρέθηκε αλλά δεν parse-άρισε σωστά σε SBML model: {path}\n{errs}"
+        )
+    return doc, model
+
+
+def find_species_id_by_name(model, name):
+    for s in model.getListOfSpecies():
+        if s.getName() == name:
+            return s.getId()
+    raise ValueError(f"No species named '{name}' found in model {model.getId()}")
+
+
+def find_param_id_by_name(model, name):
+    for p in model.getListOfParameters():
+        if p.getName() == name:
+            return p.getId()
+    return None
+
+
+def _param_display_name(p):
+    """The meaningful identity of a parameter is its Name (e.g. 'mu', 'n'),
+    NOT its raw SBML id — COPASI-exported models give every parameter a
+    GUID-style id (e.g. 'mwfc0b18ce_ba8a_4f91_bb9e_838d6f352026') and keep
+    the human name as a separate attribute. Falls back to id only if Name is
+    genuinely unset."""
+    return p.getName() or p.getId()
+
+
+def rename_in_ast(node, mapping):
+    """Walks a MathML AST and substitutes every symbol found in `mapping`.
+    This is how a copied reaction/rule stops referring to the SOURCE model's
+    ids and starts referring to the merged model's ids."""
+    if node is None:
+        return
+    if node.isName() and node.getName() in mapping:
+        node.setName(mapping[node.getName()])
+    for i in range(node.getNumChildren()):
+        rename_in_ast(node.getChild(i), mapping)
+
+
+def resolve_compartment_id(dest_model, source_model, source_compartment_id):
+    """Given a compartment id as used by a species/reaction in source_model,
+    returns the compartment id to actually use once merged into dest_model.
+
+    Same class of problem as species/parameter ids: a compartment called
+    'cell' in the reporter module might not exist under that exact id in the
+    destination model, even if conceptually it's the same physical
+    compartment. Resolution order:
+      1. dest already has a compartment with this exact id -> reuse it.
+      2. dest has a DIFFERENT-id compartment with the SAME NAME -> reuse that
+         one's id instead (this is the expected fix for the
+         'references unknown compartment cell' error).
+      3. Neither matches -> copy the compartment definition from source into
+         dest, preserving its id, but WARN loudly — this likely means the two
+         files model compartments differently and deserves a human look, not
+         a silent patch.
+    """
+    if dest_model.getCompartment(source_compartment_id) is not None:
+        return source_compartment_id
+
+    src_c = source_model.getCompartment(source_compartment_id)
+    src_name = src_c.getName() if src_c is not None else None
+    if src_name:
+        for c in dest_model.getListOfCompartments():
+            if c.getName() == src_name:
+                return c.getId()
+
+    if src_c is None:
+        raise ValueError(
+            f"Compartment '{source_compartment_id}' is referenced by a species/reaction but "
+            f"is not even defined in its own source model — the source .sbml file itself is "
+            f"malformed."
+        )
+    print(
+        f"  [!] COMPARTMENT MISSING: '{source_compartment_id}'"
+        + (f" (name='{src_name}')" if src_name else "")
+        + f" not found in the destination model by id OR by name — creating it by copying "
+        f"the definition from the source file as-is. This likely means the two .sbml files "
+        f"model compartments differently (e.g. different names for what should be the same "
+        f"physical compartment, or a genuinely separate compartment) — worth a human check, "
+        f"not just trusting this fallback."
+    )
+    new_c = dest_model.createCompartment()
+    new_c.setId(src_c.getId())
+    new_c.setName(src_c.getName())
+    new_c.setConstant(src_c.getConstant())
+    if src_c.isSetSize():
+        new_c.setSize(src_c.getSize())
+    return src_c.getId()
+
+
+def plan_compartment_renames(dest_model, source_model):
+    """Resolves EVERY compartment defined in source_model against dest_model
+    (via resolve_compartment_id) and returns {old_id: resolved_id}.
+
+    This must be merged into the SAME id_rename_map that's passed to
+    copy_reaction — not just used for species. Reason: resolve_compartment_id
+    already fixes the compartment attribute on copied SPECIES correctly, but
+    a reaction's kinetic-law MATH can also reference a compartment id
+    directly (e.g. a volume-scaling term like '* cell', which every reaction
+    in these files has). Without this rename applied to the reaction math
+    too, the kinetic law keeps the literal source compartment id, which may
+    not exist at all in the merged model — roadrunner then fails at load time
+    with "symbol 'cell' is not physically stored...", a confusing error for
+    what is actually just a missed rename.
+    """
+    return {
+        c.getId(): resolve_compartment_id(dest_model, source_model, c.getId())
+        for c in source_model.getListOfCompartments()
+    }
+
+
+def plan_parameter_renames(dest_model, source_model, prefix, skip_names=frozenset()):
+    """Decides what to do with every parameter in source_model, matched by
+    NAME against dest_model's CURRENT global parameters (not raw id — see
+    _param_display_name). Three outcomes per parameter:
+
+    - name in skip_names: not copied at all, and left OUT of the rename map
+      entirely. Kept as a general mechanism for something that should be
+      dropped entirely rather than unified. Not currently used by any caller.
+    - name in SHARED_PARAM_NAMES (e.g. 'mu', 'P'): if dest already has a
+      global parameter with this name (regardless of its — possibly GUID —
+      id), this source parameter is the SAME global quantity. It is NOT
+      copied as a second parameter; instead its id is mapped onto dest's
+      existing id, so its own reactions correctly point at the one shared
+      copy. A value mismatch is reported (not silently dropped). If dest does
+      NOT yet have it, this source's copy becomes the first, and later
+      submodules in the same merge match against it.
+    - anything else: if dest already has a DIFFERENT global parameter with
+      the same name (a genuine, likely accidental collision — e.g. two
+      unrelated Hill coefficients both named 'n'), this copy gets a fresh,
+      guaranteed-unique id and a loud warning. Otherwise it keeps its own
+      original id unchanged.
+
+    Returns (rename_map, needs_creation):
+      rename_map      -> {old_id: final_id}; feed the FULL merged dict (this
+                         plus any species/compartment renames) into
+                         copy_reaction's id_rename_map so kinetic-law math
+                         ends up pointing at the right ids.
+      needs_creation  -> set of old_ids that should actually be passed to
+                         copy_parameter(). old_ids NOT in this set (the
+                         'already shared, matched by name' case) must NOT be
+                         created — that would silently duplicate an existing
+                         global parameter under a second id.
+    """
+    dest_name_index = {}
+    for p in dest_model.getListOfParameters():
+        dest_name_index[_param_display_name(p)] = p.getId()
+
+    rename_map = {}
+    needs_creation = set()
+    for p in source_model.getListOfParameters():
+        old_id = p.getId()
+        pname = _param_display_name(p)
+        if pname in skip_names:
+            continue
+        if pname in SHARED_PARAM_NAMES:
+            if pname in dest_name_index:
+                existing_id = dest_name_index[pname]
+                rename_map[old_id] = existing_id
+                existing = dest_model.getParameter(existing_id)
+                if existing is not None and abs(existing.getValue() - p.getValue()) > SHARED_PARAM_TOLERANCE:
+                    print(
+                        f"  [!] CONFLICT: shared parameter '{pname}' already = {existing.getValue()} "
+                        f"in the destination model (id='{existing_id}'), but {prefix} defines it as "
+                        f"{p.getValue()} (id='{old_id}'). Keeping the destination's value "
+                        f"({existing.getValue()}); the {prefix} value is being DISCARDED. "
+                        f"Fix this in the .sbml files if that's not intended."
+                    )
+            else:
+                rename_map[old_id] = old_id
+                needs_creation.add(old_id)
+                dest_name_index[pname] = old_id
+            continue
+        if pname in dest_name_index:
+            new_id = f"{prefix}_{old_id}"
+            while dest_model.getParameter(new_id) is not None:
+                new_id = f"{new_id}_"
+            print(
+                f"  [!] NAME COLLISION: parameter named '{pname}' from {prefix} (id='{old_id}') "
+                f"has the SAME NAME as an already-merged parameter (likely a DIFFERENT quantity, "
+                f"e.g. two different Hill coefficients both called 'n') — renaming this copy to "
+                f"id='{new_id}' so its value/meaning isn't silently confused with the existing "
+                f"one. Its reactions are renamed to match automatically."
+            )
+            rename_map[old_id] = new_id
+            needs_creation.add(old_id)
+        else:
+            rename_map[old_id] = old_id
+            needs_creation.add(old_id)
+            dest_name_index[pname] = old_id
+    return rename_map, needs_creation
+
+
+def copy_parameter(dest_model, param, new_id, unit_rename_map=None):
+    """Creates param in dest_model under new_id. The caller (via
+    plan_parameter_renames's needs_creation set) is responsible for only
+    calling this when new_id is NOT already taken — this function does not
+    silently no-op on a collision, since with name-based planning upstream,
+    reaching an actual id collision here means something skipped the plan and
+    is a real bug worth a loud failure rather than silently discarding data.
+
+    unit_rename_map (from plan_unit_renames) maps the source's unit ids to the
+    id they get in the merged model; the parameter's own units attribute is
+    carried over through it so merged params keep their units (otherwise a
+    bare number like K_act_ox=208 ends up unitless in an nM/µM model)."""
+    if dest_model.getParameter(new_id) is not None:
+        raise AssertionError(
+            f"copy_parameter called with new_id='{new_id}' which already exists in the "
+            f"destination model. This should be impossible if plan_parameter_renames was used "
+            f"correctly — only call copy_parameter for ids in its 'needs_creation' set."
+        )
+    p = dest_model.createParameter()
+    p.setId(new_id)
+    p.setName(param.getName())
+    p.setValue(param.getValue())
+    p.setConstant(param.getConstant())
+    if param.isSetUnits():
+        u = param.getUnits()
+        p.setUnits(unit_rename_map.get(u, u) if unit_rename_map else u)
+
+
+def copy_species(dest_model, species, source_model, new_id=None, unit_rename_map=None):
+    pid = new_id or species.getId()
+    if dest_model.getSpecies(pid) is not None:
+        # Same class of bug as the parameter id collision: creating a second
+        # species with an id that already exists produces invalid/ambiguous
+        # SBML. Currently only the reporter module's species are copied this
+        # way, and only after the TIP id has already been unified — so this
+        # should never fire in practice, but fail loudly instead of emitting
+        # broken SBML if a future submodel change introduces a clash.
+        raise ValueError(
+            f"Species id collision: '{pid}' already exists in the destination model. "
+            f"Rename it in the source .sbml file, or extend copy_species with the same "
+            f"rename-planning approach used for parameters (plan_parameter_renames)."
+        )
+    resolved_compartment = resolve_compartment_id(dest_model, source_model, species.getCompartment())
+    s = dest_model.createSpecies()
+    s.setId(new_id or species.getId())
+    s.setName(species.getName())
+    s.setCompartment(resolved_compartment)
+    s.setInitialConcentration(species.getInitialConcentration())
+    s.setConstant(species.getConstant())
+    s.setBoundaryCondition(species.getBoundaryCondition())
+    s.setHasOnlySubstanceUnits(species.getHasOnlySubstanceUnits())
+    # carry the substance UNIT (not just the hasOnlySubstanceUnits boolean),
+    # renamed through the unit map so it points at the merged model's unit id
+    if species.isSetSubstanceUnits():
+        su = species.getSubstanceUnits()
+        s.setSubstanceUnits(unit_rename_map.get(su, su) if unit_rename_map else su)
+
+
+def copy_reaction(dest_model, reaction, id_rename_map, new_id):
+    r = dest_model.createReaction()
+    r.setId(new_id)
+    r.setReversible(reaction.getReversible())
+    r.setFast(False)
+    for i in range(reaction.getNumReactants()):
+        ref = reaction.getReactant(i)
+        nref = r.createReactant()
+        nref.setSpecies(id_rename_map.get(ref.getSpecies(), ref.getSpecies()))
+        nref.setStoichiometry(ref.getStoichiometry())
+        nref.setConstant(True)
+    for i in range(reaction.getNumProducts()):
+        ref = reaction.getProduct(i)
+        nref = r.createProduct()
+        nref.setSpecies(id_rename_map.get(ref.getSpecies(), ref.getSpecies()))
+        nref.setStoichiometry(ref.getStoichiometry())
+        nref.setConstant(True)
+    kl_src = reaction.getKineticLaw()
+    if kl_src is not None:
+        math_copy = kl_src.getMath().deepCopy()
+        # Single pass over the FULL mapping — rename_in_ast already walks the
+        # whole AST and substitutes every key it finds. Looping and calling it
+        # once per mapping entry would be redundant, and actively wrong for a
+        # mapping with entries that chain (A->B and B->C would cascade into
+        # A->C on a second pass). One call is correct and sufficient.
+        rename_in_ast(math_copy, id_rename_map)
+        kl = r.createKineticLaw()
+        kl.setMath(math_copy)
+
+
+def copy_rule(dest_model, rule, id_rename_map):
+    """Copies an SBML Rule (AssignmentRule / RateRule / AlgebraicRule) into
+    dest_model, renaming BOTH its target variable and its math via
+    id_rename_map — same treatment as copy_reaction's kinetic law.
+
+    Without this, a parameter with constant='false' whose value is meant to
+    be computed by a rule (the reporter's Measured_Ratio_RG, Ratio_RG_FRET,
+    Observed_Green, Total_red_pool, b_fret — and now the ox module's A_ox and
+    X_ox rate rules) gets copied as a plain static parameter by
+    copy_parameter (which doesn't care WHY something is non-constant, it just
+    copies id/name/value/constant-flag) — its INITIAL value, frozen forever,
+    since nothing ever recomputes it. No error, no dangling-symbol warning
+    (the parameter genuinely exists) — the simulation runs and looks fine,
+    it's just silently wrong for anything reading that parameter.
+
+    The variable's OWN id-renaming is already handled by
+    plan_parameter_renames/copy_parameter (rule targets are ordinary
+    parameters as far as that logic is concerned) — this only adds the
+    missing rule itself, pointed at the same (possibly renamed) variable id.
+    """
+    kind = rule.getElementName()  # 'assignmentRule', 'rateRule', 'algebraicRule'
+    variable = rule.getVariable() if hasattr(rule, "getVariable") else None
+    new_variable = id_rename_map.get(variable, variable) if variable else None
+
+    # SBML forbids more than one Rule targeting the same variable. This can
+    # happen here specifically for SHARED_PARAM_NAMES variables (mu, P): if a
+    # submodule defines ITS OWN rule for what gets recognized as 'the same'
+    # shared variable, that rule collides with dest's existing one. Keeping
+    # dest's existing rule (i.e. NOT copying this one) is almost certainly
+    # correct — shared params exist precisely to be unified — but it must be
+    # loud, not silent.
+    if new_variable is not None:
+        existing_rules = [
+            r for r in dest_model.getListOfRules() if r.getVariable() == new_variable
+        ]
+        if existing_rules:
+            print(
+                f"  [!] DUPLICATE RULE: variable '{new_variable}' already has a rule in the "
+                f"destination model — this incoming rule is NOT copied (SBML forbids two rules "
+                f"on the same variable). If this is a shared variable (e.g. mu, P), keeping "
+                f"dest's existing rule is expected; if not, the two definitions genuinely "
+                f"conflict and need a look."
+            )
+            return None
+
+    math_copy = rule.getMath().deepCopy()
+    rename_in_ast(math_copy, id_rename_map)
+
+    if rule.isAssignment():
+        new_rule = dest_model.createAssignmentRule()
+    elif rule.isRate():
+        new_rule = dest_model.createRateRule()
+    elif rule.isAlgebraic():
+        new_rule = dest_model.createAlgebraicRule()
+    else:
+        raise ValueError(f"Unsupported rule type '{kind}' — extend copy_rule to handle it.")
+
+    if new_variable is not None:
+        new_rule.setVariable(new_variable)
+    new_rule.setMath(math_copy)
+    return new_rule
+
+
+def build_variant_sbml_string(variant, save_sbml=True):
+    """Returns an SBML string for the requested variant, built fresh from the
+    separate source files. By default ALSO writes it to exportsbml/ (a
+    'latest' copy plus a timestamped, never-overwritten archive copy with a
+    manifest — see save_merged_sbml) for downstream use in sensitivity
+    analysis / the comparison circuit. Pass save_sbml=False to skip that and
+    keep in-memory-only behaviour."""
+    cfg = VARIANTS[variant]
+
+    check_for_stale_duplicate(TIP_TETR_MODEL, TIP_TETR_MODEL_ALT_CHECK)
+
+    doc_tetr, m_tetr = load_model_or_fail(TIP_TETR_MODEL)
+    doc_sensing, m_sensing = load_model_or_fail(cfg["sensing_file"])
+    doc_reporter, m_reporter = load_model_or_fail(REPORTER_MODEL)
+
+    tip_id = find_species_id_by_name(m_tetr, "TIP")
+    sensing_tip_id = find_species_id_by_name(m_sensing, cfg["tip_name"])
+
+    # --- sensing module: params / reactions / rules merge into the TIP_TetR model ---
+    # Plan collisions (matched by NAME, not raw id) BEFORE copying anything,
+    # so both the parameters themselves AND the reaction/rule math that
+    # references them get renamed consistently.
+    sensing_param_renames, sensing_needs_creation = plan_parameter_renames(
+        m_tetr, m_sensing, prefix=f"sensing_{variant}"
+    )
+    sensing_compartment_renames = plan_compartment_renames(m_tetr, m_sensing)
+    sensing_full_rename_map = {
+        sensing_tip_id: tip_id,          # TIP_ox / TIP_er  ->  the TIP_TetR model's TIP
+        **sensing_param_renames,
+        **sensing_compartment_renames,
+    }
+
+    # Units must be planned & created BEFORE any parameter/species that
+    # references them is copied, otherwise those references would point at
+    # unit ids that don't exist yet in the merged model.
+    sensing_unit_renames, sensing_unit_needs_creation = plan_unit_renames(
+        m_tetr, m_sensing, prefix=f"sensing_{variant}"
+    )
+    for ud in m_sensing.getListOfUnitDefinitions():
+        if ud.getId() in sensing_unit_needs_creation:
+            copy_unit_definition(m_tetr, ud, new_id=sensing_unit_renames[ud.getId()])
+
+    for p in m_sensing.getListOfParameters():
+        old_id = p.getId()
+        if old_id in sensing_needs_creation:
+            copy_parameter(m_tetr, p, new_id=sensing_param_renames[old_id],
+                           unit_rename_map=sensing_unit_renames)
+    for i, r in enumerate(m_sensing.getListOfReactions()):
+        copy_reaction(m_tetr, r, sensing_full_rename_map, new_id=f"sensing_{i}_{r.getId()}")
+    # NOTE 2026-09-10: this loop is what carries ox_adaptive's two new
+    # rateRules (A_ox, X_ox) into the merged model. No change was needed to
+    # support them — copy_rule already handles rateRule / assignmentRule /
+    # algebraicRule generically by kind. ERModule has no <listOfRules> at
+    # all, so this is simply a no-op loop for the "er" variant.
+    for rule in m_sensing.getListOfRules():
+        copy_rule(m_tetr, rule, sensing_full_rename_map)
+
+    # --- reporter module merge ---
+    # The reporter's own local 'P' is NOT copied as a second parameter: it's
+    # in SHARED_PARAM_NAMES, so plan_parameter_renames maps it onto the
+    # TIP_TetR model's real (rule-governed) P instead. That's the whole point
+    # — the reporter must be driven by the circuit's dynamic promoter
+    # occupancy, not by its own static placeholder value.
+    reporter_param_renames, reporter_needs_creation = plan_parameter_renames(
+        m_tetr, m_reporter, prefix="reporter"
+    )
+    reporter_compartment_renames = plan_compartment_renames(m_tetr, m_reporter)
+    reporter_full_rename_map = {**reporter_param_renames, **reporter_compartment_renames}
+
+    reporter_unit_renames, reporter_unit_needs_creation = plan_unit_renames(
+        m_tetr, m_reporter, prefix="reporter"
+    )
+    for ud in m_reporter.getListOfUnitDefinitions():
+        if ud.getId() in reporter_unit_needs_creation:
+            copy_unit_definition(m_tetr, ud, new_id=reporter_unit_renames[ud.getId()])
+
+    for s in m_reporter.getListOfSpecies():
+        copy_species(m_tetr, s, m_reporter, unit_rename_map=reporter_unit_renames)
+    for p in m_reporter.getListOfParameters():
+        old_id = p.getId()
+        if old_id in reporter_needs_creation:
+            copy_parameter(m_tetr, p, new_id=reporter_param_renames[old_id],
+                           unit_rename_map=reporter_unit_renames)
+    for i, r in enumerate(m_reporter.getListOfReactions()):
+        copy_reaction(m_tetr, r, reporter_full_rename_map, new_id=f"reporter_{i}_{r.getId()}")
+    for rule in m_reporter.getListOfRules():
+        copy_rule(m_tetr, rule, reporter_full_rename_map)
+
+    check_unruled_variable_parameters(m_tetr, f"variant={variant}")
+    check_missing_units(m_tetr, f"variant={variant}")
+    print_shared_parameter_summary(m_tetr, f"variant={variant}")
+
+    sbml_str = libsbml.writeSBMLToString(doc_tetr)
+    if save_sbml:
+        source_paths = {
+            "TIP_TetR_model": TIP_TETR_MODEL,
+            "sensing_module": cfg["sensing_file"],
+            "reporter_module": REPORTER_MODEL,
+        }
+        try:
+            save_merged_sbml(sbml_str, variant, m_tetr, source_paths)
+        except OSError as e:
+            # Saving is a convenience for downstream work, NOT required for
+            # the simulation itself — never let a filesystem hiccup (OneDrive
+            # sync locks, permissions) abort the actual run.
+            print(
+                f"  [!] WARNING: could not save merged SBML to disk ({e}). "
+                f"Continuing with the in-memory model."
+            )
+    return sbml_str
