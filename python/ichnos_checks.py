@@ -30,14 +30,25 @@ from ichnos_io import (
 #     numerically different, 271 vs 208 uM, not just a rename). Every
 #     variant needs its OWN mapping here rather than a single f"EC50_{v}"
 #     pattern.
-_ACTIVATION_PARAM_NAME = {"er": "EC50_er", "ox": "K_act_ox"}
+# 2026-09-11: ERModule's adaptive rewrite renamed EC50_er -> K_act_er too, for
+#     the same reason ox did (the constant describes activation of the sensor,
+#     not the output of the whole circuit). Both variants now use K_act_*, but
+#     the table is kept explicit rather than collapsed to an f-string: a
+#     future variant may well arrive with the old convention, and a silent
+#     f"K_act_{variant}" would then fail with a confusing "not found by name"
+#     instead of pointing at the real mismatch.
+_ACTIVATION_PARAM_NAME = {"er": "K_act_er", "ox": "K_act_ox"}
 
 # Buffer-node states (A_<module>, X_<module>) that only exist for variants
 # that have received the adaptive-sensor extension. A variant NOT listed
 # here (e.g. "er", still static) simply skips the extra S=0 invariant below
 # instead of failing — this dict is the single place to update once Vicky's
 # ER extension lands.
-_ADAPTIVE_STATE_NAMES = {"ox": ("A_ox", "X_ox")}
+# 2026-09-11: "er" joined the adaptive club. Note the two modules implement
+#     these differently — ox as parameters with rate rules, er as dimensionless
+#     species with rate rules — but after the merge both appear as ordinary
+#     relabeled columns, so this check does not care which.
+_ADAPTIVE_STATE_NAMES = {"ox": ("A_ox", "X_ox"), "er": ("A_er", "X_er")}
 
 
 def build_bypass_sbml_string(exogenous_tip_level, save_sbml=False):
@@ -458,3 +469,4 @@ def check_cross_variant_shared_values(variants=None, param_names=None, save_sbml
     print(f"  {'PASS' if all_passed else 'FAIL'}: shared parameters are "
           f"{'consistent' if all_passed else 'NOT consistent'} across variants.")
     return {"values": values, "passed": all_passed}
+
