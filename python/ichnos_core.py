@@ -480,6 +480,57 @@ def copy_rule(dest_model, rule, id_rename_map):
     return new_rule
 
 
+def copy_initial_assignments(dest_model, source_model, id_rename_map, label,
+                             skip_symbols=frozenset()):
+    """Copies InitialAssignments from source_model into dest_model, renaming
+    both the target symbol and the math via id_rename_map.
+
+    ADDED 2026-09-11. Nothing handled InitialAssignments before, because no
+    submodel used them — so any that appeared were silently dropped, the same
+    quiet-data-loss pattern as the missing sensing-species copy and the
+    NaN-initial-value bug. ox_adaptive_v2 introduced one:
+
+        TIP_ox = beta_basal_ox / (k_deg_TIP + mu)
+
+    i.e. the basal steady state computed from the parameters instead of a
+    hard-coded number, so it tracks automatically if k_deg_TIP changes again.
+
+    skip_symbols: source ids whose assignment must NOT be carried over.
+    Two cases need this:
+      - the sensing module's TIP, which is UNIFIED onto the destination's TIP
+        rather than copied. Its assignment computes the basal steady state of
+        the ISOLATED module; in the merged circuit free TIP is additionally
+        drained into TetR_TIP_complex, so that value is not the merged basal
+        state either (measured: 1.98 nM merged vs 3.70 standalone). Applying it
+        would just swap one arbitrary starting point for another while
+        silently overriding an initial condition the destination model owns.
+      - calibration-only species, which are not in the merged model at all.
+
+    Anything skipped is reported rather than dropped quietly — that is the
+    whole point of this function existing.
+    """
+    copied = 0
+    for ia in source_model.getListOfInitialAssignments():
+        symbol = ia.getSymbol()
+        if symbol in skip_symbols:
+            print(f"  [i] Not carrying over InitialAssignment for '{symbol}' from {label} "
+                  f"(target is unified onto the destination's own species, or excluded "
+                  f"from the merge); the destination's initial value is kept.")
+            continue
+        new_symbol = id_rename_map.get(symbol, symbol)
+        if dest_model.getElementBySId(new_symbol) is None:
+            print(f"  [!] InitialAssignment in {label} targets '{symbol}', which has no "
+                  f"counterpart in the merged model — not copied.")
+            continue
+        math_copy = ia.getMath().deepCopy()
+        rename_in_ast(math_copy, id_rename_map)
+        new_ia = dest_model.createInitialAssignment()
+        new_ia.setSymbol(new_symbol)
+        new_ia.setMath(math_copy)
+        copied += 1
+    return copied
+
+
 def build_variant_sbml_string(variant, save_sbml=True):
     """Returns an SBML string for the requested variant, built fresh from the
     separate source files. By default ALSO writes it to exportsbml/ (a
@@ -576,6 +627,11 @@ def build_variant_sbml_string(variant, save_sbml=True):
         if target in skipped_species_ids:
             continue
         copy_rule(m_tetr, rule, sensing_full_rename_map)
+    copy_initial_assignments(
+        m_tetr, m_sensing, sensing_full_rename_map,
+        label=f"the {variant} sensing module",
+        skip_symbols={sensing_tip_id} | skipped_species_ids,
+    )
 
     # --- reporter module merge, skipping its own local P (use Ioanna's dynamic P instead) ---
     # 'P' is handled via SHARED_PARAM_NAMES below (same mechanism as 'mu'):
@@ -604,6 +660,9 @@ def build_variant_sbml_string(variant, save_sbml=True):
         copy_reaction(m_tetr, r, reporter_full_rename_map, new_id=f"reporter_{i}_{r.getId()}")
     for rule in m_reporter.getListOfRules():
         copy_rule(m_tetr, rule, reporter_full_rename_map)
+    copy_initial_assignments(
+        m_tetr, m_reporter, reporter_full_rename_map, label="the reporter module"
+    )
 
     check_unruled_variable_parameters(m_tetr, f"variant={variant}")
     check_missing_units(m_tetr, f"variant={variant}")

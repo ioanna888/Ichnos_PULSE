@@ -337,16 +337,61 @@ def sanity_check_zero_stress(variant, t_end=200, n_points=200, leak_threshold_fr
     saturating_ts, saturating = run_at(ec50_value * 1000.0)
 
     # 'activation readout' — total reporter signal (sum of all Reporter_* channels)
+    # --- leak ratio ---
+    # CHANGED 2026-09-11: compare PEAK reporter signal, not the value at t_end.
+    #
+    # The question this check asks is "does basal leak activate the circuit as
+    # much as real stress does", so the right reference is the MAXIMUM
+    # activation the stress can produce. Using the value at t_end assumed the
+    # saturating case settles at a high plateau — true for a sensor with
+    # partial adaptation (ox), but false for one with perfect adaptation.
+    #
+    # er_adaptive_final3 set d_x_er = 0, making X_er a pure integrator. That
+    # gives perfect adaptation: A_er decays back towards 0 (as 1/sqrt(t), so
+    # there is no true steady state at all — X_er grows without bound), and
+    # with it TIP and the reporter return towards basal. By t_end the
+    # saturating run has therefore come back down to near the basal level and
+    # the final-value ratio approaches 1 — the check reported FAIL at 0.707
+    # while the circuit was in fact activating perfectly well. It was
+    # measuring how completely the sensor adapts, not how much it leaks.
+    #
+    # Peak-based comparison needs no per-variant configuration: for a
+    # monotonic (non-adapting) response peak == final, so this reduces
+    # exactly to the previous behaviour, while for an adapting response it
+    # measures what was intended. Both numbers are printed, because a large
+    # gap between them IS the signature of an adapting sensor and is worth
+    # seeing.
     reporter_keys = [k for k in basal if "Reporter" in k]
-    basal_reporter = sum(basal[k] for k in reporter_keys)
-    saturating_reporter = sum(saturating[k] for k in reporter_keys)
-    frac = (basal_reporter / saturating_reporter) if saturating_reporter > 0 else float("nan")
+
+    def _peak_total(ts):
+        import numpy as np
+        total = None
+        for col in ts.colnames:
+            if "Reporter" not in col:
+                continue
+            series = np.array(ts[col])
+            total = series if total is None else total + series
+        return float(total.max()) if total is not None else float("nan")
+
+    basal_final = sum(basal[k] for k in reporter_keys)
+    saturating_final = sum(saturating[k] for k in reporter_keys)
+    basal_peak = _peak_total(basal_ts)
+    saturating_peak = _peak_total(saturating_ts)
+
+    frac = (basal_peak / saturating_peak) if saturating_peak > 0 else float("nan")
+    frac_final = (basal_final / saturating_final) if saturating_final > 0 else float("nan")
     passed = frac < leak_threshold_frac
 
     print(f"\n=== SANITY CHECK 1 — S=0 (variant={variant}) ===")
-    print(f"  Basal (S=0) total reporter signal:        {basal_reporter:.4f}")
-    print(f"  Saturating (S=1000×{ec50_name}) reporter signal: {saturating_reporter:.4f}")
-    print(f"  Basal / saturating ratio: {frac:.3f}  (threshold: < {leak_threshold_frac})")
+    print(f"  Basal (S=0) reporter signal:      peak {basal_peak:8.4f}   at t_end {basal_final:8.4f}")
+    print(f"  Saturating (S=1000×{ec50_name}):      peak {saturating_peak:8.4f}   "
+          f"at t_end {saturating_final:8.4f}")
+    print(f"  Basal / saturating, PEAK:  {frac:.3f}  (threshold: < {leak_threshold_frac})")
+    print(f"  Basal / saturating, t_end: {frac_final:.3f}  (not the criterion; shown for context)")
+    if saturating_peak > 0 and saturating_final / saturating_peak < 0.8:
+        print(f"  [i] The saturating response has decayed to "
+              f"{100*saturating_final/saturating_peak:.0f}% of its peak by t={t_end}h — this "
+              f"sensor adapts, so the t_end ratio above is a measure of adaptation, not leak.")
     print(f"  {'PASS' if passed else 'FAIL'}: basal leak is "
           f"{'well below' if passed else 'NOT below'} the full-activation level.")
 
@@ -369,7 +414,9 @@ def sanity_check_zero_stress(variant, t_end=200, n_points=200, leak_threshold_fr
 
     return {
         "variant": variant, "basal": basal, "saturating": saturating,
-        "basal_reporter": basal_reporter, "saturating_reporter": saturating_reporter,
+        "basal_reporter_peak": basal_peak, "saturating_reporter_peak": saturating_peak,
+        "basal_reporter_final": basal_final, "saturating_reporter_final": saturating_final,
+        "leak_fraction_final": frac_final,
         "leak_fraction": frac, "passed": passed and adaptive_passed,
     }
 
@@ -469,4 +516,3 @@ def check_cross_variant_shared_values(variants=None, param_names=None, save_sbml
     print(f"  {'PASS' if all_passed else 'FAIL'}: shared parameters are "
           f"{'consistent' if all_passed else 'NOT consistent'} across variants.")
     return {"values": values, "passed": all_passed}
-
