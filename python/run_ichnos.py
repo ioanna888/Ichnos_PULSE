@@ -67,6 +67,23 @@ def _summarize_dynamics(result, names):
         for row in rows:
             print(f"  {row['name']:10s}  peak={row['peak']:.4f} @ t={row['t_peak']:.3f}h   "
                   f"plateau={row['plateau']:.4f}   peak/plateau={row['peak_over_plateau']:.3f}")
+        # Undersampling guard, added 2026-09-11. An adaptive sensor can peak
+        # within minutes (A_ox at ~4 min) while a default run covers 200 h in
+        # 500 points — a 0.4 h grid. The reported peak is then whichever
+        # sample happens to land nearest the real one: A_ox came out as
+        # 0.5342 @ 24 min instead of 0.8622 @ 4.2 min. Wrong by 38%, and
+        # entirely plausible-looking. Anything peaking within the first few
+        # samples is suspect, so say so rather than print a confident wrong
+        # number.
+        dt_hours = float(t[1] - t[0]) if len(t) > 1 else float("nan")
+        for row in rows:
+            if dt_hours > 0 and row["t_peak"] <= 5 * dt_hours and row["peak"] > row["plateau"]:
+                print(f"  [!] '{row['name']}' peaks {row['t_peak']/dt_hours:.1f} sample(s) into "
+                      f"a {dt_hours:.3f}h grid — the peak is UNDERSAMPLED and both its height "
+                      f"and its timing are unreliable. Re-run over a shorter window with more "
+                      f"points (e.g. run_variant(variant, t_end=6, n_points=4000)), or "
+                      f"use plot_ichnos.py / dose_response.py, which sample densely.")
+                break
     return rows
 
 
