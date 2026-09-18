@@ -1,0 +1,9 @@
+# Python Cache
+__pycache__/
+*.pyc
+
+# Data and Outputs
+*.csv
+figures/
+*.png
+*.pdf
