@@ -39,22 +39,28 @@ WHAT THIS SCRIPT TESTS
 
    This is an ASSUMPTION, not a measurement: sqrt scaling is a rough model for
    film densitometry. The question the script answers is not "what are the
-   right weights" but "do the conclusions move when we weight sensibly". If
-   weighted and unweighted agree, the conclusion is robust to the choice.
+   right weights" but "do the conclusions move when we weight sensibly". They
+   do not — which is the useful negative result.
 
 3. QUANTIFICATION METHOD. Both panels were quantified two independent ways —
-   fixed row windows and two-template unmixing. Earlier runs showed the two
-   disagree about parameter values (k_off by 420x, d_x by 230x) while agreeing
-   that clearance wins. Running both here makes that explicit, because the
-   spread BETWEEN methods turned out to be larger than the confidence interval
-   WITHIN either one: the dominant uncertainty is systematic, not statistical.
-   Reporting a CI from a single method understates it.
+   fixed row windows and two-template unmixing. The two disagree about
+   parameter values (k_off by ~400x, d_x by ~400x) while agreeing that
+   clearance wins. Running both makes that explicit, because the spread
+   BETWEEN methods is larger than the confidence interval WITHIN either one:
+   the dominant uncertainty is systematic, not statistical. Reporting a CI
+   from a single method understates it.
 
    For Fig 2B the densitometry notes argue the window method is the more
    trustworthy of the two, because unmixing uses the t=5 min lane as its
    "pure oxidised" template while the window method says that lane is only
    0.775 oxidised — a contaminated template inflates every value. The unmix
    column is kept here as a robustness check, not as an equal alternative.
+
+FAILED SIMULATIONS ARE NOT REJECTIONS
+--------------------------------------
+Scan points where every simulation failed are dropped rather than recorded as
+an enormous SSE — see profile_common.py. A verdict marked "?" has a bound
+sitting beside missing data and should be treated as provisional.
 
 GEL SCALE
 ---------
@@ -80,6 +86,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from profile_common import penalty_floor, is_penalty, summarise_losses
+
 # k_x is fixed by construction — it defines the unit of X and is not fittable.
 K_X = 1.0
 
@@ -99,12 +107,16 @@ C_UNMIX = np.array([0.000, 0.115, 0.496, 0.732, 0.934, 0.976, 1.000])
 C_LOADING = np.array([3973.5, 5634.1, 3739.9, 6579.9, 4799.6, 3470.4, 2951.0])
 C_TIME_H = 5.0 / 60.0
 
+N_POINTS = len(B_TIME_MIN) + len(C_DOSE)
+
 NAMES = ["r", "k_on", "d_x", "K_act", "n", "k_clear", "scale"]
 LO = dict(r=1e-4, k_on=1., d_x=1e-3, K_act=20., n=1., k_clear=1e-3, scale=0.3)
 HI = dict(r=1e3, k_on=2000., d_x=50., K_act=3000., n=8., k_clear=50., scale=3.0)
 
 SCAN_DECADES = 1.0   # +/- one decade around the best fit
 SCAN_POINTS = 41     # ~1.12x step, fine enough to resolve intervals near 1.2x
+
+PENALTY_FLOOR = penalty_floor()
 
 
 def weights(use_weights):
@@ -141,19 +153,21 @@ def simulate(p, dose, t_max_h, n_points=3000):
 def residuals(p, yb, yc, wb, wc):
     t, A = simulate(p, B_DOSE, B_TIME_MIN[-1] / 60.0 + 0.05)
     if np.any(~np.isfinite(A)):
-        return np.full(14, 1e3)
+        return np.full(N_POINTS, 1e3)
     rb = (np.interp(B_TIME_MIN / 60.0, t, A) - yb) * wb
     rc = []
     for dose, y in zip(C_DOSE, yc):
         tt, AA = simulate(p, dose, C_TIME_H + 0.05, n_points=800)
         if np.any(~np.isfinite(AA)):
-            return np.full(14, 1e3)
+            return np.full(N_POINTS, 1e3)
         rc.append((p["scale"] * np.interp(C_TIME_H, tt, AA) - y))
     return np.concatenate([rb, np.asarray(rc) * wc])
 
 
 def optimise(yb, yc, wb, wc, fixed=None, fixed_value=None, x0=None,
              starts=1, rng=None):
+    """Returns (params, sse), or (None, nan) when the point could not be
+    evaluated at all — see profile_common.py."""
     free = [n for n in NAMES if n != fixed]
     lo = np.log([LO[n] for n in free])
     hi = np.log([HI[n] for n in free])
@@ -180,8 +194,11 @@ def optimise(yb, yc, wb, wc, fixed=None, fixed_value=None, x0=None,
         if best is None or r.cost < best.cost:
             best = r
     if best is None:
-        return None, np.inf
-    return {n: v for n, v in zip(free, np.exp(best.x))}, 2.0 * best.cost
+        return None, np.nan
+    sse_here = 2.0 * best.cost
+    if is_penalty(sse_here, PENALTY_FLOOR):
+        return None, np.nan
+    return {n: v for n, v in zip(free, np.exp(best.x))}, sse_here
 
 
 def run_case(method, use_weights, starts, seed, do_profile=True):
@@ -200,11 +217,11 @@ def run_case(method, use_weights, starts, seed, do_profile=True):
     found = 0
     for _ in range(starts):
         _, c = optimise(yb, yc, wb, wc, starts=1, rng=rng)
-        if c <= sse * 1.05:
+        if np.isfinite(c) and c <= sse * 1.05:
             found += 1
 
     k_off = best["k_on"] * best["d_x"] / (best["r"] * K_X)
-    dof = max(14 - len(NAMES), 1)
+    dof = max(N_POINTS - len(NAMES), 1)
     sigma2 = sse / dof
     delta = chi2.ppf(0.95, df=1) * sigma2
 
@@ -221,29 +238,37 @@ def run_case(method, use_weights, starts, seed, do_profile=True):
               f"to absorb mismatch, so their values measure nothing.")
 
     if not do_profile:
-        return dict(best=best, sse=sse, spans={}, k_off=k_off)
+        return dict(best=best, sse=sse, spans={}, curves={}, k_off=k_off)
 
     print(f"  {'param':9}{'CI low':>12}{'CI high':>12}{'span':>9}   verdict")
     spans, curves = {}, {}
+    total_lost = 0
     for pname in NAMES:
         centre = best[pname]
         grid = centre * np.logspace(-SCAN_DECADES, SCAN_DECADES, SCAN_POINTS)
         grid = grid[(grid >= LO[pname]) & (grid <= HI[pname])]
         if grid.size < 3:
             continue
-        xs, ys = [], []
+        xs, ys, lost = [], [], 0
         for direction in (1, -1):
             seq = grid[grid >= centre] if direction == 1 else grid[grid < centre][::-1]
             x0 = dict(best)
             for val in seq:
                 vals, s = optimise(yb, yc, wb, wc, fixed=pname, fixed_value=val,
                                    x0=x0, starts=1)
-                if vals is None:
+                if vals is None or not np.isfinite(s):
+                    lost += 1
                     continue
+                # Warm start only from a point that actually worked.
                 x0 = dict(vals)
                 x0[pname] = val
                 xs.append(val)
                 ys.append(s)
+        total_lost += lost
+        if len(xs) < 3:
+            print(f"  {pname:9}{'— too few usable scan points —':>45}"
+                  f"{summarise_losses(lost, grid.size)}")
+            continue
         order = np.argsort(xs)
         xs = np.asarray(xs)[order]
         ys = np.asarray(ys)[order]
@@ -259,11 +284,17 @@ def run_case(method, use_weights, starts, seed, do_profile=True):
         else:
             lo_ci = hi_ci = span = float("nan")
             verdict = "(profile error)"
+        if lost:
+            verdict += "?"
         spans[pname] = span
-        print(f"  {pname:9}{lo_ci:>12.4g}{hi_ci:>12.4g}{span:>8.1f}x   {verdict}")
+        print(f"  {pname:9}{lo_ci:>12.4g}{hi_ci:>12.4g}{span:>8.1f}x   "
+              f"{verdict}{summarise_losses(lost, grid.size)}")
 
     print(f"\n  A span below ~{10**(2*SCAN_DECADES/(SCAN_POINTS-1)):.2f}x is at "
           f"the resolution of the scan grid, so read it as 'tight', not exact.")
+    if total_lost:
+        print(f"  [!] {total_lost} scan points were unevaluable and dropped; "
+              f"verdicts marked '?' rest on a bound next to missing data.")
     return dict(best=best, sse=sse, spans=spans, curves=curves, k_off=k_off)
 
 
@@ -312,7 +343,8 @@ def main():
                 else:
                     vals.append(res["best"][n])
             row = "".join(f"{v:>12.4g}" for v in vals)
-            spread = max(vals) / min(vals) if min(vals) > 0 else float("nan")
+            finite = [v for v in vals if np.isfinite(v) and v > 0]
+            spread = max(finite) / min(finite) if finite else float("nan")
             print(f"  {n:9}{row}   spread {spread:.1f}x")
         print("\n  Compare each row's spread against that parameter's confidence")
         print("  interval within a single case. Where the spread is larger, the")
@@ -326,7 +358,9 @@ def main():
                 if p in ref["curves"]]
         fig, axes = plt.subplots(1, len(show), figsize=(3.3 * len(show), 4.0),
                                  sharey=True)
-        dof = max(14 - len(NAMES), 1)
+        if len(show) == 1:
+            axes = [axes]
+        dof = max(N_POINTS - len(NAMES), 1)
         delta = chi2.ppf(0.95, df=1) * ref["sse"] / dof
         for ax, pname in zip(axes, show):
             xs, ys = ref["curves"][pname]
@@ -349,3 +383,4 @@ def main():
 if __name__ == "__main__":
     main()
 
+    

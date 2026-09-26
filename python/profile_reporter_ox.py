@@ -13,10 +13,10 @@ should fare WORSE, for a reason that has nothing to do with data quality:
     smooths on a timescale of hours.
 
 So the ox sensor's entire informative transient is six times faster relative
-to a filter that is unchanged. The 60 min run confirmed this: only K_act
-(2.2x) and n (1.8x) survived, while k_clear went to 8.3x and the fit landed
-3000x away from the reference in r. This script re-runs the comparison over a
-window long enough for the reporter to actually peak.
+to a filter that is unchanged. The 60 min run confirmed it: only K_act and n
+survived, while k_clear went to 8.3x and the fit landed 3000x away from the
+reference in r. This script re-runs the comparison over a window long enough
+for the reporter to actually peak.
 
 GROUND TRUTH — A WEAKER FOOTING THAN FOR ER
 --------------------------------------------
@@ -36,6 +36,15 @@ The absolute spans in either column should not be quoted on their own. In
 particular the direct column looks near-perfect only because the synthetic
 design has 5 doses x 14 timepoints = 70 points, whereas the real Delaunay
 data have 14 points in a single time course.
+
+FAILED SIMULATIONS ARE NOT REJECTIONS
+--------------------------------------
+An earlier version of this script recorded unevaluable scan points as an
+enormous SSE, which the confidence interval then read as a rejection. The
+result was k_clear reported as "1.0x, identifiable" alongside 972 solver
+failures, with a vertical wall beside the minimum and no points in between.
+Such points are now dropped and counted; see profile_common.py. A verdict
+marked "?" has a bound adjacent to missing data and is provisional.
 
 PARAMETRISATION
 ---------------
@@ -85,6 +94,7 @@ import matplotlib.pyplot as plt
 from ichnos_core import build_variant_sbml_string
 from ichnos_io import _find_id_by_name
 from run_sensitivity_v4 import add_clearance
+from profile_common import penalty_floor, is_penalty, summarise_losses
 
 K_X = 1.0
 
@@ -98,16 +108,23 @@ DOSES = [50., 100., 200., 400., 800.]
 
 BOUNDS_LO = dict(r=1e-4, k_on=1., d_x=1e-3, K_act=20., n=1., k_clear=1e-3,
                  Kd=0.01)
-BOUNDS_HI = dict(r=1e3, k_on=2000., d_x=50., K_act=3000., n=8., k_clear=50.,
-                 Kd=100.)
+BOUNDS_HI = dict(r=1e3, k_on=2000., d_x=50., K_act=3000., n=8.,
+                 # 10/h is a 4-minute half-life, already faster than any
+                 # plausible H2O2 sink. The previous bound of 50/h drove S to
+                 # underflow inside a 12 h window — which is where the solver
+                 # failures cluster — and no value up there would ever be
+                 # reported anyway, so the wide bound bought nothing.
+                 k_clear=10., Kd=100.)
 
 # Beyond this the derived k_off makes the ODE stiff enough that the solver
-# stalls at h ~ 1e-8 h instead of returning a wrong answer, costing minutes
-# per point. See simulate().
+# stalls instead of returning a wrong answer. Kept as a cheap pre-filter; note
+# it did NOT fire in practice, so it is not the main source of failures.
 K_OFF_MAX = 1e5
 
 SCAN_DECADES = 1.0
 SCAN_POINTS = 25   # each point is a full re-optimisation of the merged model
+
+PENALTY_FLOOR = penalty_floor()
 
 
 class OxCircuit:
@@ -127,12 +144,11 @@ class OxCircuit:
             roadrunner.Logger.setLevel(roadrunner.Logger.LOG_FATAL)
         except Exception:
             pass   # cosmetic only — the run works either way
-        # The states here are O(0.1-20), so 1e-11 absolute is far tighter than
-        # anything the results depend on — and it is actively harmful: with a
-        # decaying input, S reaches 1e-10 and below late in a long window, and
-        # asking the solver for 1e-11 absolute accuracy on a quantity that
-        # small makes it shrink the step indefinitely instead of accepting that
-        # S is, for every practical purpose, zero.
+        # The states are O(0.1-20), so 1e-11 absolute is far tighter than the
+        # results need — and with a decaying input it is actively harmful: S
+        # reaches 1e-10 late in a long window, and demanding 1e-11 absolute
+        # accuracy on a quantity that small makes the solver shrink the step
+        # indefinitely instead of accepting that S is effectively zero.
         self.r.integrator.absolute_tolerance = 1e-8
         self.r.integrator.relative_tolerance = 1e-7
         self.r.integrator.maximum_num_steps = 20000
@@ -157,11 +173,6 @@ class OxCircuit:
         # scripts describe the same parametrisation.
         k_off = p["k_on"] * p["d_x"] / (p["r"] * K_X)
         if not np.isfinite(k_off) or k_off > K_OFF_MAX:
-            # Rejecting here gives the same verdict the failed solve would,
-            # immediately. Worth noting WHY the optimiser goes there at all:
-            # it only wanders into k_off ~ 1e6 because the data do not
-            # penalise it, so these stalls are a symptom of the flatness this
-            # script is measuring, not an unrelated numerical nuisance.
             self.rejected += 1
             return None, None
         self.r[self.pid["k_on"]] = float(p["k_on"])
@@ -239,10 +250,18 @@ def profile(circuit, readout, t_h, names, noise_frac, seed, verbose=True):
             if best is None or r.cost < best.cost:
                 best = r
         if best is None:
-            return None, np.inf
-        return {n: v for n, v in zip(nm, np.exp(best.x))}, 2.0 * best.cost
+            return None, np.nan
+        sse_here = 2.0 * best.cost
+        if is_penalty(sse_here, PENALTY_FLOOR):
+            # Every simulation at this fixed value failed: unevaluable, not
+            # rejected. NaN keeps it out of the profile.
+            return None, np.nan
+        return {n: v for n, v in zip(nm, np.exp(best.x))}, sse_here
 
     best, sse = opt(x0=truth, starts=4)
+    if best is None:
+        print(f"\n[{readout}] reference fit failed — cannot profile.")
+        return dict(best=None, sse=np.nan, spans={}, curves={}, sigma=sigma)
     delta = chi2.ppf(0.95, df=1) * sigma ** 2
 
     if verbose:
@@ -254,30 +273,37 @@ def profile(circuit, readout, t_h, names, noise_frac, seed, verbose=True):
                if abs(np.log(best[n] / truth[n])) > np.log(1.5)]
         if off:
             print(f"  [!] >1.5x from the reference system: {'; '.join(off)}")
-            print(f"      The fit found a DIFFERENT sensor that produces nearly "
-                  f"the same observable — biased, not merely uncertain.")
+            print("      The fit found a DIFFERENT sensor that produces nearly "
+                  "the same observable — biased, not merely uncertain.")
         print(f"  {'param':9}{'CI low':>12}{'CI high':>12}{'span':>9}   verdict")
 
     spans, curves = {}, {}
+    total_lost = 0
     for pname in names:
         centre = best[pname]
         grid = centre * np.logspace(-SCAN_DECADES, SCAN_DECADES, SCAN_POINTS)
         grid = grid[(grid >= BOUNDS_LO[pname]) & (grid <= BOUNDS_HI[pname])]
         if grid.size < 3:
             continue
-        xs, ys = [], []
+        xs, ys, lost = [], [], 0
         for direction in (1, -1):
             seq = grid[grid >= centre] if direction == 1 else grid[grid < centre][::-1]
             x0 = dict(best)
             for val in seq:
                 vals, s = opt(pname, val, x0=x0, starts=1)
-                if vals is None:
+                if vals is None or not np.isfinite(s):
+                    lost += 1
                     continue
+                # Warm start only from a point that actually worked.
                 x0 = dict(vals)
                 x0[pname] = val
                 xs.append(val)
                 ys.append(s)
+        total_lost += lost
         if len(xs) < 3:
+            if verbose:
+                print(f"  {pname:9}{'— too few usable scan points —':>45}"
+                      f"{summarise_losses(lost, grid.size)}")
             continue
         order = np.argsort(xs)
         xs = np.asarray(xs)[order]
@@ -294,9 +320,16 @@ def profile(circuit, readout, t_h, names, noise_frac, seed, verbose=True):
         else:
             lo_ci = hi_ci = span = float("nan")
             verdict = "(profile error)"
+        if lost:
+            verdict += "?"
         spans[pname] = span
         if verbose:
-            print(f"  {pname:9}{lo_ci:>12.4g}{hi_ci:>12.4g}{span:>8.1f}x   {verdict}")
+            print(f"  {pname:9}{lo_ci:>12.4g}{hi_ci:>12.4g}{span:>8.1f}x   "
+                  f"{verdict}{summarise_losses(lost, grid.size)}")
+
+    if verbose and total_lost:
+        print(f"  [!] {total_lost} scan points unevaluable and dropped — "
+              f"verdicts marked '?' rest on a bound next to missing data.")
 
     return dict(best=best, sse=sse, spans=spans, curves=curves, sigma=sigma)
 
@@ -356,7 +389,8 @@ def main():
     for n in names:
         a = out["yap1"]["spans"].get(n, float("nan"))
         g = out["green"]["spans"].get(n, float("nan"))
-        print(f"  {n:10}{a:>11.1f}x{g:>11.1f}x{g/a:>14.1f}x")
+        ratio = g / a if (np.isfinite(a) and np.isfinite(g) and a > 0) else float("nan")
+        print(f"  {n:10}{a:>11.1f}x{g:>11.1f}x{ratio:>14.1f}x")
     print("\n  Same sensor in both columns; only the measurement changes.")
     print("  r, k_on and d_x are already poorly determined from the direct")
     print("  readout (steady-state degeneracy), so the informative rows are")
@@ -364,11 +398,15 @@ def main():
     print(f"\n  Stiff-guard rejections: {circuit.rejected}   "
           f"solver failures: {circuit.solver_failures}")
     print("  Both count parameter regions the data failed to rule out on their")
-    print("  own — a high count is itself evidence of a flat likelihood.")
+    print("  own — a high count is itself evidence of a flat likelihood, and")
+    print("  those points are now dropped rather than read as rejections.")
 
     # --- Figure ---
     show = [n for n in names if n in out["yap1"]["curves"]
             and n in out["green"]["curves"]]
+    if not show:
+        print("\nNo overlapping profiles to plot.")
+        return
     fig, axes = plt.subplots(1, len(show), figsize=(3.3 * len(show), 4.0))
     if len(show) == 1:
         axes = [axes]
@@ -397,4 +435,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    

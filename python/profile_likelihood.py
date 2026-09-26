@@ -40,12 +40,20 @@ WHICH MODEL (--no-clearance)
 -----------------------------
 By default this profiles M2 (with the decaying-input term). With
 --no-clearance it profiles M0, the constant-S baseline. That comparison exists
-to settle a specific open question: fit_er_pincus.py reported two independent
-runs landing on (K_act, n, k_on) = (1226, 3.28, 3.89) and (2317, 1.27, 7.01)
-with IDENTICAL SSE — a textbook identifiability valley. None of the M2 profiles
+to settle a specific question: fit_er_pincus.py reported two independent runs
+landing on (K_act, n, k_on) = (1226, 3.28, 3.89) and (2317, 1.27, 7.01) with
+IDENTICAL SSE — a textbook identifiability valley. None of the M2 profiles
 reproduce it. Profiling M0 directly tests whether the valley belongs to the
 constant-S ASSUMPTION rather than to the sensor structure, which would explain
 why adding the clearance term closes it.
+
+FAILED SIMULATIONS ARE NOT REJECTIONS
+--------------------------------------
+Scan points where every simulation failed are dropped rather than recorded as
+an enormous SSE — see profile_common.py for why that distinction matters and
+what it silently did to an earlier run. Any parameter whose interval rests
+beside a dropped region is flagged with "?" in the verdict, because a bound
+next to missing data is not a bound.
 
 Caveat on the structural claim: a profile that looks flat within the scanned
 window might rise outside it, and numerical optimisation can fail to find the
@@ -86,8 +94,9 @@ import matplotlib.pyplot as plt
 from fit_er_pincus import load_data
 from fit_er_pincus_clearance import simulate
 from synthetic_recovery import TRUTH, DOSE_SETS, make_timepoints
+from profile_common import penalty_floor, is_penalty, summarise_losses
 
-# Scan each parameter over this factor above and below its true value.
+# Scan each parameter over this factor above and below its best-fit value.
 # 4x with 41 points gives a ~1.07x step — fine enough to resolve the tight
 # intervals (some are under 1.1x); a coarser grid reports them all as "1.0x"
 # because the interval falls between two scan points.
@@ -106,6 +115,8 @@ BOUNDS_LO = {"K_act": 50., "n": 1.0, "k_on": 0.05, "k_off": 0.05,
              "d_x": 1e-4, "k_clear": 1e-3}
 BOUNDS_HI = {"K_act": 20000., "n": 8.0, "k_on": 200., "k_off": 2000.,
              "d_x": 50., "k_clear": 50.}
+
+PENALTY_FLOOR = penalty_floor()
 
 
 def build_data(doses, t_min, noise, rng):
@@ -136,19 +147,14 @@ def make_theta(values, names, fixed_name=None, fixed_value=None, fit_n=False,
     return (p["K_act"], p["n"], p["k_on"], p["k_off"], p["d_x"], p["k_clear"])
 
 
-def sse_of(theta, data):
-    total = 0.0
-    for dose, (t, y) in sorted(data.items()):
-        model = simulate(theta, dose, t, clearance=True)
-        if np.any(~np.isfinite(model)):
-            return np.inf
-        total += float(np.sum((model - y) ** 2))
-    return total
-
-
 def optimise(data, names, fixed_name=None, fixed_value=None, fit_n=False,
              x0=None, n_starts=4, rng=None, no_clearance=False):
-    """Least-squares over `names`, with fixed_name pinned if given."""
+    """Least-squares over `names`, with fixed_name pinned if given.
+
+    Returns (params, sse), or (None, nan) when the point could not be
+    evaluated — see profile_common.py. NaN, not inf: inf would still sort and
+    compare as a very large SSE and could slip into a profile.
+    """
     lo = np.log([BOUNDS_LO[n] for n in names])
     hi = np.log([BOUNDS_HI[n] for n in names])
 
@@ -181,8 +187,13 @@ def optimise(data, names, fixed_name=None, fixed_value=None, fit_n=False,
         if best is None or r.cost < best.cost:
             best = r
     if best is None:
-        return None, np.inf
-    return np.exp(best.x), 2.0 * best.cost
+        return None, np.nan
+    sse_here = 2.0 * best.cost
+    if is_penalty(sse_here, PENALTY_FLOOR):
+        # Every simulation here hit the penalty: the point is unevaluable, not
+        # rejected. Returning NaN keeps it out of the profile entirely.
+        return None, np.nan
+    return {n: v for n, v in zip(names, np.exp(best.x))}, sse_here
 
 
 def main():
@@ -197,17 +208,10 @@ def main():
                          "which means the threshold inherits whatever model "
                          "misspecification there is, not just measurement error.")
     ap.add_argument("--no-clearance", action="store_true",
-                    help="profile the M0 baseline (S held constant) instead of "
-                         "M2. This is the model fit_er_pincus.py used when two "
-                         "independent runs landed on (K_act,n,k_on) = "
-                         "(1226,3.28,3.89) and (2317,1.27,7.01) with identical "
-                         "SSE. Profiling M0 directly tests whether that valley "
-                         "belongs to the constant-S assumption rather than to "
-                         "the sensor structure.")
+                    help="profile the M0 baseline (S held constant) instead of M2")
     ap.add_argument("--doses", type=int, default=4, choices=sorted(DOSE_SETS),
                     help="synthetic only; --real-data uses whatever the CSV has")
-    ap.add_argument("--timepoints", type=int, default=14,
-                    help="synthetic only")
+    ap.add_argument("--timepoints", type=int, default=14, help="synthetic only")
     ap.add_argument("--fit-n", action="store_true",
                     help="treat n as unknown too (the realistic case)")
     ap.add_argument("--starts", type=int, default=4)
@@ -254,12 +258,15 @@ def main():
         x0=np.array([TRUTH[n] for n in names]),
         n_starts=max(args.starts, 8 if args.real_data else args.starts), rng=rng,
         no_clearance=args.no_clearance)
+    if best_vals is None:
+        raise SystemExit("Reference fit failed everywhere — check the data and bounds.")
     print("Reference fit (all free):")
-    print("  " + "  ".join(f"{n}={v:.4g}" for n, v in zip(names, best_vals)))
+    print("  " + "  ".join(f"{n}={v:.4g}" for n, v in zip(names, best_vals.values())))
     print(f"  SSE={best_sse:.3e}")
 
-    at_bound = [n for n, v in zip(names, best_vals)
-                if v <= BOUNDS_LO[n] * 1.01 or v >= BOUNDS_HI[n] * 0.99]
+    at_bound = [n for n in names
+                if best_vals[n] <= BOUNDS_LO[n] * 1.01
+                or best_vals[n] >= BOUNDS_HI[n] * 0.99]
     if at_bound:
         print(f"  [!] at bound: {', '.join(at_bound)} — the optimiser pushed "
               f"these as far as it was allowed. That usually means the model "
@@ -288,10 +295,11 @@ def main():
     print(f"95% threshold: SSE must rise by {delta:.3e} to reject a value\n")
 
     profiles = {}
+    total_lost = 0
     print(f"  {'param':9}{'CI low':>12}{'CI high':>12}{'span':>10}"
           f"{'verdict':>20}   coupled with")
-    for i, pname in enumerate(names):
-        centre = best_vals[i]
+    for pname in names:
+        centre = best_vals[pname]
         grid = centre * np.logspace(-np.log10(SCAN_FACTOR),
                                     np.log10(SCAN_FACTOR), SCAN_POINTS)
         grid = grid[(grid >= BOUNDS_LO[pname]) & (grid <= BOUNDS_HI[pname])]
@@ -300,28 +308,40 @@ def main():
             continue
 
         others = [n for n in names if n != pname]
-        sses, partners = [], []
+        xs, ys, partners, lost = [], [], [], 0
         # Walk outward from the centre, warm-starting each step from the
         # previous solution: profiling fails most often when a step lands in a
         # different basin, and continuation is the standard defence.
         for direction in (1, -1):
             seq = grid[grid >= centre] if direction == 1 else grid[grid < centre][::-1]
-            x0 = np.array([best_vals[names.index(n)] for n in others])
+            x0 = np.array([best_vals[n] for n in others])
             for val in seq:
                 vals, sse = optimise(data, others, fixed_name=pname,
                                      fixed_value=val, fit_n=args.fit_n,
                                      x0=x0, n_starts=1,
                                      no_clearance=args.no_clearance)
-                if vals is None:
+                if vals is None or not np.isfinite(sse):
+                    lost += 1
                     continue
-                x0 = vals
-                sses.append((val, sse))
-                ref = np.array([best_vals[names.index(n)] for n in others])
-                shift = np.abs(np.log(vals / ref))
+                # Warm start only from a point that actually worked, so a
+                # failed region does not poison the continuation downstream.
+                x0 = np.array([vals[n] for n in others])
+                xs.append(val)
+                ys.append(sse)
+                ref = np.array([best_vals[n] for n in others])
+                shift = np.abs(np.log(x0 / ref))
                 partners.append(others[int(np.argmax(shift))])
-        sses.sort()
-        xs = np.array([s[0] for s in sses])
-        ys = np.array([s[1] for s in sses])
+        total_lost += lost
+
+        if len(xs) < 3:
+            print(f"  {pname:9}{'— too few usable scan points —':>54}"
+                  f"{summarise_losses(lost, grid.size)}")
+            continue
+
+        order = np.argsort(xs)
+        xs = np.asarray(xs)[order]
+        ys = np.asarray(ys)[order]
+        partners = [partners[j] for j in order]
         profiles[pname] = (xs, ys)
 
         inside = xs[ys <= best_sse + delta]
@@ -344,22 +364,35 @@ def main():
             lo_ci = hi_ci = span = float("nan")
             verdict = "(profile error)"
 
+        # A bound sitting next to a dropped region is not a real bound.
+        if lost:
+            verdict += "?"
+
         # Which parameter moved most, among the points still inside the CI.
         inside_mask = ys <= best_sse + delta
         near = [p for p, m in zip(partners, inside_mask) if m] or partners
         partner = max(set(near), key=near.count) if near else "-"
 
         print(f"  {pname:9}{lo_ci:>12.4g}{hi_ci:>12.4g}{span:>10.1f}x"
-              f"{verdict:>20}   {partner}")
+              f"{verdict:>20}   {partner}"
+              f"{summarise_losses(lost, grid.size)}")
 
     print("\n  span = CI high / CI low. 'NON-IDENTIFIABLE' means the profile never")
     print(f"  rose above threshold within the scanned {SCAN_FACTOR:g}x window either way —")
     print("  the data cannot pin the parameter down at all in that range.")
     print("  'one-sided' means only one bound exists (e.g. a lower limit but no")
     print("  upper one). The last column names the parameter that compensated most.")
-    print("  Note the scan is clipped to the optimiser's bounds, so a 'one-sided'")
+    print("  The scan is clipped to the optimiser's bounds, so a 'one-sided'")
     print("  verdict on a parameter sitting at its bound means the window ran out,")
     print("  not necessarily that the data is uninformative beyond it.")
+    if total_lost:
+        print(f"\n  [!] {total_lost} scan points across all parameters could not be")
+        print("  evaluated (every simulation there failed) and were DROPPED rather")
+        print("  than recorded as a rejection. Verdicts marked '?' have a bound")
+        print("  adjacent to missing data and should be read as provisional.")
+    else:
+        print("\n  Every scan point evaluated successfully — no intervals rest on")
+        print("  missing data.")
     if args.real_data:
         print("\n  With real data there is no known truth to compare against: these")
         print("  are intervals around the best fit, not errors. A tight interval")
@@ -368,6 +401,9 @@ def main():
 
     # --- Figure ---
     plotted = [n for n in names if n in profiles]
+    if not plotted:
+        print("\nNo profiles to plot.")
+        return
     fig, axes = plt.subplots(1, len(plotted), figsize=(3.6 * len(plotted), 4.2),
                              sharey=True)
     if len(plotted) == 1:
@@ -397,4 +433,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
     
