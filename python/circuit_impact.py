@@ -98,6 +98,8 @@ def apply_scenario(variant, scenario):
 
 def run_variant(variant, quick):
     V = R.Variant(variant, quick=quick)
+    # Resolved only to report the baseline value; curve() does its own
+    # resolution from the name.
     d_x_id = _find_id_by_name(V.sbml, f"d_x_{variant}")
     if d_x_id is None:
         raise RuntimeError(f"could not resolve d_x_{variant} in the merged model")
@@ -109,10 +111,15 @@ def run_variant(variant, quick):
     rows = {}
     for scenario in SCENARIOS:
         d_x, k_clear = apply_scenario(variant, scenario)
-        # Variant.curve() resets the model each call, so the override has to be
-        # passed through rather than set once up front.
-        row = V.curve(k_clear=k_clear,
-                      overrides={d_x_id: d_x} if d_x is not None else None)
+        # Variant.curve() already has a single-parameter override hook
+        # (pname/value) used by the sensitivity sweeps, and it applies it
+        # after the resetToOrigin() inside its own loop — which is why setting
+        # V.r[d_x_id] here would be silently undone. Reusing the hook also
+        # keeps these numbers on exactly the same code path as the existing
+        # Tables A/B/C, so they stay comparable.
+        row = V.curve(pname=f"d_x_{variant}" if d_x is not None else None,
+                      value=d_x,
+                      k_clear=k_clear)
         rows[scenario] = row
 
     for tag in ("1h", "3h", "6h"):
