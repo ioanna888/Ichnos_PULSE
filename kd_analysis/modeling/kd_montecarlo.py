@@ -2,29 +2,36 @@
 ICHNOS — Monte Carlo διάδοση αβεβαιότητας Kd
 
 ΤΙ ΚΑΝΕΙ
-Παίρνει τις δομικές εκτιμήσεις ΔG (21 poses από τρεις ανεξάρτητες μεθόδους),
-προσθέτει το σφάλμα βαθμονόμησης του PRODIGY, και διαδίδει την προκύπτουσα
-κατανομή Kd μέσα από τις καμπύλες απόκρισης του kd_extended.csv.
+Παίρνει τις δομικές εκτιμήσεις ΔG, προσθέτει το σφάλμα βαθμονόμησης του
+PRODIGY, και διαδίδει την προκύπτουσα κατανομή Kd μέσα από τις καμπύλες
+απόκρισης του kd_extended.csv.
 
 Απαντά: με ποια πιθανότητα το κύκλωμα (α) δίνει ανιχνεύσιμο σήμα,
 (β) διατηρεί λειτουργικό tandem timer, (γ) και τα δύο μαζί.
 
+ΙΣΤΟΡΙΚΟ (βλ. KD_ANALYSIS_REPORT.md για πλήρη τεκμηρίωση)
+Το ensemble αναθεωρήθηκε: οι αρχικές 21 δομικές εκτιμήσεις προέκυψαν από
+docking εναντίον ΜΟΝΟΜΕΡΟΥΣ TetR. Η πειραματική δομή 2NS8 έδειξε ότι η
+θέση δέσμευσης εκτείνεται πάνω από το ΔΙΜΕΡΕΣ. Ελεγχόμενο πείραμα στην
+ίδια δομή:
+    διμερές (A+B+H)    84 επαφές   ΔG -11.2   Kd 8.1 nM
+    διμερές (C+D+F)    83 επαφές   ΔG -11.7   Kd 3.7 nM
+    μονομερές (A+H)    35 επαφές   ΔG  -8.3   Kd 950 nM
+Η απουσία του δεύτερου μονομερούς κοστίζει 2.9 kcal/mol (117x στο Kd).
+
+Το κατώφλι ratio_spread αναθεωρήθηκε επίσης: 0.05 σημαίνει «τέλεια
+αμεταβλητότητα» στο ichnos_invariance.py, όχι όριο λειτουργίας. Το
+πραγματικό όριο πέρα από το οποίο ο λόγος παύει να είναι ρολόι είναι 0.20.
+Χρησιμοποιήστε --ratio 0.20, όχι την ιστορική προεπιλογή.
+
 ΔΥΟ ΠΗΓΕΣ ΑΒΕΒΑΙΟΤΗΤΑΣ, ΔΙΑΔΙΔΟΝΤΑΙ ΜΑΖΙ
-1. Αβεβαιότητα pose — τα 21 poses δεν συμφωνούν μεταξύ τους. Αντί να
-   επιλέξουμε ένα, δειγματοληπτούμε ομοιόμορφα από όλα.
-2. Σφάλμα βαθμονόμησης PRODIGY — περίπου 1.5 kcal/mol. Προστίθεται ως
-   γκαουσιανός θόρυβος σε κάθε δείγμα ΔG.
-
-Οι δύο πηγές είναι ανεξάρτητες και σωρευτικές.
-
-ΠΡΟΣΟΧΗ ΣΤΟ ratio_spread
-Η διασπορά λόγου ΔΕΝ είναι μονότονη ως προς το Kd: κορυφώνεται γύρω στο
-baseline και πέφτει και προς τις δύο κατευθύνσεις. Στα υψηλά Kd πέφτει
-επειδή το κύκλωμα δεν αποκρίνεται καθόλου — δηλαδή "timer OK" εκεί είναι
-τετριμμένο. Γι' αυτό η κρίσιμη μετρική είναι το P(και τα δύο).
+1. Αβεβαιότητα δομής — πλέον μικρή: τα δύο ανεξάρτητα κρυσταλλογραφικά
+   αντίγραφα διαφέρουν μόλις 0.5 kcal/mol.
+2. Σφάλμα βαθμονόμησης PRODIGY — ~1.5 kcal/mol. Παραμένει η κύρια πηγή
+   αβεβαιότητας μετά τη διόρθωση της δομής.
 
     python kd_montecarlo.py
-    python kd_montecarlo.py --fold 1.2 --n 500000
+    python kd_montecarlo.py --fold 1.2 --ratio 0.20 --n 500000
 """
 
 import argparse
@@ -43,36 +50,15 @@ R_KCAL = 1.987204e-3          # kcal/(mol*K)
 T_KELVIN = 303.15             # 30 C, θερμοκρασία καλλιέργειας ζύμης
 RT = R_KCAL * T_KELVIN        # ~0.6023 kcal/mol
 
-# --- Δομικές εκτιμήσεις ΔG (kcal/mol, PRODIGY @30C) ----------------------
-#
-# ΑΝΑΘΕΩΡΗΣΗ: Οι προηγούμενες εκτιμήσεις (21 docking poses, ClusPro +
-# HPEPDOCK) έγιναν εναντίον ΜΟΝΟΜΕΡΟΥΣ TetR. Η πειραματική δομή 2NS8
-# δείχνει ότι η θέση δέσμευσης εκτείνεται πάνω από το ΔΙΜΕΡΕΣ: κάθε Tip
-# αγγίζει δύο μονομερή, με δύο ξεχωριστές ομάδες καταλοίπων
-# (60-142 στο ένα, 144-182 στο άλλο).
-#
-# Ελεγχόμενο πείραμα στην ίδια δομή:
-#     A+B+H (διμερές)   84 επαφές   ΔG -11.2   Kd 8.1 nM
-#     C+D+F (διμερές)   83 επαφές   ΔG -11.7   Kd 3.7 nM
-#     A+H  (μονομερές)  35 επαφές   ΔG  -8.3   Kd 950 nM
-#
-# -> Η απουσία του δεύτερου μονομερούς κοστίζει 2.9 kcal/mol (117x στο Kd)
-#    και εξηγεί γιατί το παλιό consensus έβγαινε 313 nM.
-#
-# Prior τώρα: τα δύο ανεξάρτητα αντίγραφα της πειραματικής δομής.
-# Διαφέρουν 0.5 kcal/mol, πολύ κάτω από το σφάλμα της μεθόδου (1.5).
+# --- Ensemble δομικών εκτιμήσεων (ΔG σε kcal/mol, PRODIGY @30C) ----------
+# Πειραματική δομή 2NS8, δύο ανεξάρτητα αντίγραφα στην ασύμμετρη μονάδα.
 DG_ENSEMBLE = {
     "2NS8 A+B+H (πειραματική)": [-11.2],
     "2NS8 C+D+F (πειραματική)": [-11.7],
 }
 
-# Το πεπτίδιο του κρυστάλλου είναι Ac-Tip· το δικό μας είναι MTip.
-# Πίνακας 1 της βιβλιογραφίας: MTip 37% έναντι Tip 24% induction,
-# δηλαδή το δικό μας δένει κάπως ισχυρότερα. Δεν εφαρμόζεται διόρθωση
-# (το induction δεν μεταφράζεται ευθέως σε ΔG), αλλά η κατεύθυνση είναι
-# ευνοϊκή και η εκτίμηση παραμένει συντηρητική.
-
-PRODIGY_SIGMA = 1.5   # kcal/mol, τυπικό σφάλμα της μεθόδου
+PRODIGY_SIGMA = 1.5   # kcal/mol, τυπικό σφάλμα της μεθόδου -- αμετάβλητο
+                      # ανεξάρτητα από την ποιότητα της δομής εισόδου
 
 
 def dg_to_kd_nM(dg):
@@ -102,12 +88,63 @@ def interp_log(kd_query, kd_grid, values):
     return np.interp(np.log(kd_query), np.log(kd_grid), values)
 
 
+def describe_window(kd_grid, fold_grid, ratio_grid, fold_thr, ratio_thr, median_kd):
+    """Βρίσκει ΟΛΟ το εύρος Kd που ικανοποιεί ταυτόχρονα fold>=thr ΚΑΙ
+    ratio<=thr, σαρώνοντας το πλέγμα -- όχι μόνο το πρώτο σημείο που
+    συναντάμε ξεκινώντας από κάτω. Ξεχωρίζει μονόπλευρο άνω όριο,
+    μονόπλευρο κάτω όριο, πλήρες διάστημα, ή κενό."""
+    probe = np.logspace(np.log10(kd_grid.min()), np.log10(kd_grid.max()), 4000)
+    f_probe = interp_log(probe, kd_grid, fold_grid)
+    r_probe = interp_log(probe, kd_grid, ratio_grid)
+    ok = (f_probe >= fold_thr) & (r_probe <= ratio_thr)
+
+    print(f"\n  Διάμεσος τρέχουσας εκτίμησης: {median_kd:.1f} nM")
+
+    if not ok.any():
+        print("  ΚΕΝΟ: καμία τιμή Kd στο πλέγμα δεν ικανοποιεί και τα δύο "
+              "κριτήρια ταυτόχρονα.")
+        return
+
+    lo_ok, hi_ok = probe[ok].min(), probe[ok].max()
+    at_lower_edge = lo_ok <= probe[0] * 1.01
+    at_upper_edge = hi_ok >= probe[-1] * 0.99
+
+    if at_lower_edge and not at_upper_edge:
+        print(f"  Λειτουργικό εύρος: Kd <= {hi_ok:.1f} nM "
+              f"(ο timer δεν είναι δεσμευτικός σε αυτό το κατώφλι)")
+        if median_kd > hi_ok:
+            print(f"  Απαιτούμενη βελτίωση: από διάμεσο {median_kd:.1f} nM "
+                  f"προς <= {hi_ok:.1f} nM  ->  παράγοντας "
+                  f"{median_kd/hi_ok:.1f}x ({RT*math.log(median_kd/hi_ok):.2f} kcal/mol)")
+        else:
+            print(f"  Η διάμεσος ({median_kd:.1f} nM) είναι ήδη μέσα στο εύρος.")
+    elif at_upper_edge and not at_lower_edge:
+        print(f"  Λειτουργικό εύρος: Kd >= {lo_ok:.1f} nM")
+        if median_kd < lo_ok:
+            print(f"  Απαιτούμενη μετακίνηση: από διάμεσο {median_kd:.1f} nM "
+                  f"προς >= {lo_ok:.1f} nM  ->  παράγοντας "
+                  f"{lo_ok/median_kd:.1f}x ({RT*math.log(lo_ok/median_kd):.2f} kcal/mol)")
+        else:
+            print(f"  Η διάμεσος ({median_kd:.1f} nM) είναι ήδη μέσα στο εύρος.")
+    else:
+        print(f"  Λειτουργικό εύρος: {lo_ok:.1f} – {hi_ok:.1f} nM "
+              f"(πλάτος {hi_ok/lo_ok:.1f}x)")
+        if lo_ok <= median_kd <= hi_ok:
+            print(f"  Η διάμεσος ({median_kd:.1f} nM) είναι ήδη μέσα στο εύρος.")
+        else:
+            target = hi_ok if median_kd > hi_ok else lo_ok
+            print(f"  Απαιτούμενη μετακίνηση: από διάμεσο {median_kd:.1f} nM "
+                  f"προς {target:.1f} nM  ->  παράγοντας "
+                  f"{max(median_kd,target)/min(median_kd,target):.1f}x")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fold", type=float, default=1.5,
                     help="κατώφλι ανιχνεύσιμου fold-change (default 1.5)")
-    ap.add_argument("--ratio", type=float, default=0.05,
-                    help="μέγιστη επιτρεπτή διασπορά λόγου (default 0.05)")
+    ap.add_argument("--ratio", type=float, default=0.20,
+                    help="μέγιστη επιτρεπτή διασπορά λόγου (default 0.20 -- "
+                         "όριο λειτουργίας κατά ichnos_invariance.py, ΟΧΙ 0.05)")
     ap.add_argument("--sigma", type=float, default=PRODIGY_SIGMA,
                     help="σφάλμα βαθμονόμησης PRODIGY σε kcal/mol (default 1.5)")
     ap.add_argument("--n", type=int, default=200000, help="δείγματα Monte Carlo")
@@ -119,31 +156,29 @@ def main():
     curves = load_curves(CSV_PATH, args.readout)
 
     # --- Το ensemble --------------------------------------------------
-    all_dg = [dg for lst in DG_ENSEMBLE.values() for dg in lst]
-    all_dg = np.array(all_dg)
+    all_dg = np.array([dg for lst in DG_ENSEMBLE.values() for dg in lst])
 
     print("=" * 72)
     print("ENSEMBLE ΔΟΜΙΚΩΝ ΕΚΤΙΜΗΣΕΩΝ")
     print("=" * 72)
     for label, lst in DG_ENSEMBLE.items():
         kds = dg_to_kd_nM(np.array(lst))
-        print(f"  {label:<26} n={len(lst):<3} "
+        print(f"  {label:<28} n={len(lst):<3} "
               f"ΔG {min(lst):.1f}..{max(lst):.1f}  "
-              f"Kd {kds.min():.0f}..{kds.max():.0f} nM")
-    print(f"  {'ΣΥΝΟΛΟ':<26} n={len(all_dg)}")
+              f"Kd {kds.min():.1f}..{kds.max():.1f} nM")
+    print(f"  {'ΣΥΝΟΛΟ':<28} n={len(all_dg)}")
     print(f"\n  Γεωμετρικός μέσος Kd (χωρίς θόρυβο): "
-          f"{dg_to_kd_nM(all_dg.mean()):.0f} nM")
+          f"{dg_to_kd_nM(all_dg.mean()):.1f} nM")
 
     # --- Δειγματοληψία ------------------------------------------------
-    # 1. διάλεξε pose ομοιόμορφα  2. πρόσθεσε σφάλμα βαθμονόμησης
     idx = rng.integers(0, len(all_dg), size=args.n)
     dg_samples = all_dg[idx] + rng.normal(0.0, args.sigma, size=args.n)
     kd_samples = dg_to_kd_nM(dg_samples)
 
     q = np.percentile(kd_samples, [5, 25, 50, 75, 95])
     print(f"\n  Κατανομή Kd μετά τη διάδοση (σ={args.sigma} kcal/mol, N={args.n}):")
-    print(f"    5%={q[0]:.1f}  25%={q[1]:.0f}  διάμεσος={q[2]:.0f}  "
-          f"75%={q[3]:.0f}  95%={q[4]:.0f} nM")
+    print(f"    5%={q[0]:.1f}  25%={q[1]:.1f}  διάμεσος={q[2]:.1f}  "
+          f"75%={q[3]:.1f}  95%={q[4]:.1f} nM")
 
     # --- Διάδοση μέσα από τις καμπύλες --------------------------------
     print(f"\n{'='*72}")
@@ -195,20 +230,9 @@ def main():
         "P_both": joint.mean(),
     })
 
-    # --- Πόσο θα έπρεπε να βελτιωθεί το Kd ----------------------------
-    kd_grid, fold_grid, ratio_grid = curves["er"]
-    need = None
-    for kd_try in np.logspace(np.log10(kd_grid.min()), np.log10(kd_grid.max()), 2000):
-        f = interp_log(np.array([kd_try]), kd_grid, fold_grid)[0]
-        r = interp_log(np.array([kd_try]), kd_grid, ratio_grid)[0]
-        if f >= args.fold and r <= args.ratio:
-            need = kd_try
-            break
-    if need:
-        median_kd = np.median(kd_samples)
-        print(f"\n  Απαιτούμενη βελτίωση: από διάμεσο {median_kd:.0f} nM "
-              f"προς <= {need:.1f} nM  ->  παράγοντας {median_kd/need:.0f}x")
-        print(f"  Σε ενεργειακούς όρους: {RT*math.log(median_kd/need):.1f} kcal/mol")
+    # --- Ποιο εύρος Kd ικανοποιεί και τα δύο κριτήρια (το πιο αυστηρό
+    #     από τα δύο variants, δηλαδή er στην πράξη) -------------------
+    describe_window(*curves["er"], args.fold, args.ratio, np.median(kd_samples))
 
     # --- Γραφή --------------------------------------------------------
     keys = sorted({k for row in summary for k in row})
@@ -222,3 +246,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    

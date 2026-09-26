@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.DS_Store
+
+# Το merged SBML ξαναχτίζεται από τα πηγαία αρχεία σε κάθε run.
+# Το archive/ όμως ΘΕΛΟΥΜΕ να μπαίνει στο git: είναι η μόνιμη αναφορά
+# στην οποία δείχνουν τα downstream αποτελέσματα (sensitivity analysis,
+# comparison circuit) — γι' αυτό εξαιρείται ρητά παρακάτω.
+python/exportsbml/*.sbml
+!python/exportsbml/archive/
