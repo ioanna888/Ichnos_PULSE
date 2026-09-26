@@ -263,13 +263,24 @@ def plan_parameter_renames(dest_model, source_model, prefix, skip_names=frozense
                 rename_map[old_id] = existing_id
                 existing = dest_model.getParameter(existing_id)
                 if existing is not None and abs(existing.getValue() - p.getValue()) > SHARED_PARAM_TOLERANCE:
-                    print(
-                        f"  [!] CONFLICT: shared parameter '{pname}' already = {existing.getValue()} "
-                        f"in the destination model (id='{existing_id}'), but {prefix} defines it as "
-                        f"{p.getValue()} (id='{old_id}'). Keeping the destination's value "
-                        f"({existing.getValue()}); the {prefix} value is being DISCARDED. "
-                        f"Fix this in the .sbml files if that's not intended."
+                    dest_is_rule_governed = any(
+                        r.getVariable() == existing_id for r in dest_model.getListOfRules()
                     )
+                    if dest_is_rule_governed:
+                        print(
+                            f"  [i] Shared parameter '{pname}': destination (id='{existing_id}') is "
+                            f"RULE-GOVERNED, so its listed value ({existing.getValue()}) is only an "
+                            f"initial value overwritten every step. The static {prefix} value "
+                            f"({p.getValue()}, id='{old_id}') is discarded as expected — no conflict."
+                        )
+                    else:
+                        print(
+                            f"  [!] CONFLICT: shared parameter '{pname}' already = {existing.getValue()} "
+                            f"in the destination model (id='{existing_id}'), but {prefix} defines it as "
+                            f"{p.getValue()} (id='{old_id}'). Keeping the destination's value "
+                            f"({existing.getValue()}); the {prefix} value is being DISCARDED. "
+                            f"Fix this in the .sbml files if that's not intended."
+                        )
             else:
                 rename_map[old_id] = old_id
                 needs_creation.add(old_id)
