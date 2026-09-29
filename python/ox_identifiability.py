@@ -56,6 +56,23 @@ WHAT THIS SCRIPT TESTS
    0.775 oxidised — a contaminated template inflates every value. The unmix
    column is kept here as a robustness check, not as an equal alternative.
 
+   WHAT k_clear ACTUALLY PARAMETRISES. It is the drive the SENSOR sees, not
+   the concentration in the medium. Those coincide only if the mechanism is
+   consumption of the stressor; they diverge completely if the cell is
+   adapting while the chemical is still there.
+
+   The distinction matters because we cannot have it both ways. For the
+   oxidative module we invoke catalase and peroxiredoxins — enzymes that
+   consume H2O2, an EXTRACELLULAR change. But Pincus 2010 attributes UPR
+   attenuation to INTRACELLULAR feedback, and that is the mechanism our own
+   ER fit is competing against. Invoking whichever is convenient per module
+   is not a mechanism, it is a fitted term with two stories attached.
+
+   What the data supports: the effective drive falls. Nothing in a downstream
+   readout distinguishes "the chemical went away" from "the cell stopped
+   responding to it". Every statement in the report is therefore phrased as
+   "the effective input decays", never "the DTT is cleared".
+
 FAILED SIMULATIONS ARE NOT REJECTIONS
 --------------------------------------
 Scan points where every simulation failed are dropped rather than recorded as

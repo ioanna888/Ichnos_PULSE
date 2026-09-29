@@ -50,6 +50,26 @@ CAVEATS — read before quoting any of this
 3. A failed fit is EVIDENCE, not proof. Multi-start reduces but does not
    remove the chance of missing the right basin.
 
+   WHAT A IS BEING EQUATED WITH
+-----------------------------
+The model reads A, the active-sensor fraction, directly as the measured
+% spliced HAC1. That skips a step: splicing produces an mRNA POOL, and what
+the Northern blot sees is the pool, not the splicing rate.
+
+The justification usually given — Hac1p's ~2 min half-life (Rüegsegger) —
+does not cover this. That figure is for the PROTEIN. The spliced mRNA has its
+own turnover, and we have no measurement of it.
+
+If that turnover is fast relative to the sensor, the identification is
+harmless and A tracks the pool. If it is comparable, then part of what we are
+attributing to a falling input is the pool draining after splicing slows, and
+k_clear absorbs it.
+
+This is an assumption, not a derivation, and it is not tested here. Adding an
+mRNA state would change the parameter count and invalidate every AIC
+comparison in this file, so it belongs to a separate revision rather than a
+footnote.
+
 Usage:
     python fit_er_pincus.py                # linear only, 30 starts
     python fit_er_pincus.py --saturating   # also fit the saturating variant

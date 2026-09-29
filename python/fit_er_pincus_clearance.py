@@ -53,16 +53,48 @@ CAVEATS — read before quoting any of this
    than reflecting a real physical clearance rate. Treat the fitted half-life
    as a hypothesis to test experimentally (measure DTT in the medium over
    time), not as a measured quantity.
-2. This is evidence for "the input assumption is wrong", NOT evidence that
-   the mechanism is literally solute clearance. An equally consistent
-   explanation is that the UPR reduces its own effective drive over time
-   (e.g. as unfolded protein load falls) — mathematically indistinguishable
-   from a decaying dose with only a downstream readout. Only measuring DTT in
-   the medium directly, or a re-dosing experiment, can tell the two apart.
+
+2. 2. WHAT k_clear ACTUALLY PARAMETRISES. It is the drive the SENSOR sees, not
+   the concentration in the medium. Those coincide only if the mechanism is
+   consumption of the stressor; they diverge completely if the cell is
+   adapting while the chemical is still there.
+
+   The distinction matters because we cannot have it both ways. For the
+   oxidative module we invoke catalase and peroxiredoxins — enzymes that
+   consume H2O2, an EXTRACELLULAR change. But Pincus 2010 attributes UPR
+   attenuation to INTRACELLULAR feedback, and that is the mechanism our own
+   ER fit is competing against. Invoking whichever is convenient per module
+   is not a mechanism, it is a fitted term with two stories attached.
+
+   What the data supports: the effective drive falls. Nothing in a downstream
+   readout distinguishes "the chemical went away" from "the cell stopped
+   responding to it". Every statement in the report is therefore phrased as
+   "the effective input decays", never "the DTT is cleared".
+
 3. A failed model is evidence, not proof — multi-start reduces but does not
    remove the chance of missing a better basin, especially for M1 where n is
    only weakly constrained by 2 doses.
+   WHAT A IS BEING EQUATED WITH
+-----------------------------
+The model reads A, the active-sensor fraction, directly as the measured
+% spliced HAC1. That skips a step: splicing produces an mRNA POOL, and what
+the Northern blot sees is the pool, not the splicing rate.
 
+The justification usually given — Hac1p's ~2 min half-life (Rüegsegger) —
+does not cover this. That figure is for the PROTEIN. The spliced mRNA has its
+own turnover, and we have no measurement of it.
+
+If that turnover is fast relative to the sensor, the identification is
+harmless and A tracks the pool. If it is comparable, then part of what we are
+attributing to a falling input is the pool draining after splicing slows, and
+k_clear absorbs it.
+
+This is an assumption, not a derivation, and it is not tested here. Adding an
+mRNA state would change the parameter count and invalidate every AIC
+comparison in this file, so it belongs to a separate revision rather than a
+footnote.
+
+   
 Usage:
     python fit_er_pincus_clearance.py                  # all models, 25 starts
     python fit_er_pincus_clearance.py --starts 60
