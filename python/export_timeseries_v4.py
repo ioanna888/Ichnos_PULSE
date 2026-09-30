@@ -19,7 +19,7 @@ import csv
 
 import numpy as np
 
-from run_sensitivity_v4 import (Variant, STRESS, INPUT_SCENARIOS, T_END,
+from python.run_sensitivity_v4 import (Variant, STRESS, INPUT_SCENARIOS, T_END,
                                 N_POINTS, OUT_NAME, RATIO_NAME)
 
 
