@@ -16,6 +16,26 @@ ICHNOS — οπτικοποίηση της ανάλυσης ευαισθησία
     python plot_sensitivity_v4.py --csv sensitivity_v4.csv --outdir figures --format pdf
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import argparse
 import math
 import os
@@ -62,7 +82,7 @@ VARIANT_TITLE = {"ox": "OX — οξειδωτικό στρες", "er": "ER — �
 READOUTS = (1.0, 3.0, 6.0)
 
 SCENARIO_LABEL = {
-    0.0:   "σταθερό S (τώρα)",
+    0.0:   "σταθερό S (frozen baseline)",
     0.693: "καθαρισμός, ημιζωή 60 min",
     1.777: "καθαρισμός, fit 2B+2C",
 }
@@ -427,10 +447,10 @@ def fig_timeseries(ts, variant, outdir, fmts, signal="A", second="Observed_Green
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Σχήματα για την ανάλυση ευαισθησίας v4")
-    ap.add_argument("--csv", default="sensitivity_v4.csv")
-    ap.add_argument("--timeseries", default="timeseries_v4.csv",
+    ap.add_argument("--csv", default=str(RESULTS_DIR / "sensitivity" / "sensitivity_v4.csv"))
+    ap.add_argument("--timeseries", default=str(RESULTS_DIR / "pulse_transfer" / "timeseries_v4.csv"),
                     help="προαιρετικό· παράγεται από το export_timeseries_v4.py")
-    ap.add_argument("--outdir", default="figures")
+    ap.add_argument("--outdir", default=str(FIGURES_DIR / "sensitivity"))
     ap.add_argument("--format", default="png,pdf",
                     help="λίστα με κόμματα, π.χ. png ή png,pdf ή svg")
     args = ap.parse_args()
