@@ -43,6 +43,26 @@ ICHNOS — κύκλωμα-μάρτυρας χωρίς ανάδραση, έκδο
     python run_control_circuit_v2.py
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import csv
 import io
 import sys
@@ -230,7 +250,7 @@ def main():
               f"{100*(1-fbr['n_eff']/nfr['n_eff']):.1f}% και κοστίζει "
               f"{nfr['fold_change']/fbr['fold_change']:.1f}x σε δυναμικό εύρος")
 
-    with open("control_results_v2.csv", "w", newline="", encoding="utf-8") as fh:
+    with open(RESULTS_DIR / "comparison" / "control_results_v2.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader(); w.writerows(rows)
     print(f"\nΓράφτηκαν {len(rows)} γραμμές στο control_results_v2.csv")

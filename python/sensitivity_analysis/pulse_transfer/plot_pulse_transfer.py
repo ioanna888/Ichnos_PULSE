@@ -1,3 +1,23 @@
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import argparse
 
 import matplotlib
@@ -11,7 +31,7 @@ def main():
     parser.add_argument("--csv", required=True)
     parser.add_argument("--dose", type=float, default=208)
     parser.add_argument("--variant", default="ox", choices=["ox", "er"])
-    parser.add_argument("--out", default="python/figures/pulse_transfer_ox_208uM.png")
+    parser.add_argument("--out", default=str(FIGURES_DIR / "pulse_transfer" / "pulse_transfer_ox_208uM.png"))
     args = parser.parse_args()
 
     data = pd.read_csv(args.csv)

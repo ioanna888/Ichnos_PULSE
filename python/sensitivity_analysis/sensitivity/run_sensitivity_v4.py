@@ -34,6 +34,26 @@ ICHNOS — sensitivity analysis v4
     python run_sensitivity_v4.py --quick     # λιγότερα σημεία, για δοκιμή
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import csv
 import io
 import json
@@ -330,7 +350,7 @@ def main():
             store[(vn, f"input::{lab}")] = row
             print(f"    {lab:28} " + "  ".join(f"{SHORT[k]}={row[k]:8.4f}" for k in KEY))
 
-    with open("sensitivity_v4.csv", "w", newline="", encoding="utf-8") as fh:
+    with open(RESULTS_DIR / "sensitivity" / "sensitivity_v4.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader(); w.writerows(rows)
     print(f"\nΓράφτηκαν {len(rows)} γραμμές στο sensitivity_v4.csv")

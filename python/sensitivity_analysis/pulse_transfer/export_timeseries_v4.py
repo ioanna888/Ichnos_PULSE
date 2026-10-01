@@ -14,18 +14,38 @@ timeseries_v4.csv, το οποίο το plot_sensitivity_v4.py το βρίσκε
     python export_timeseries_v4.py --points 300 --out timeseries_v4.csv
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import argparse
 import csv
 
 import numpy as np
 
-from python.run_sensitivity_v4 import (Variant, STRESS, INPUT_SCENARIOS, T_END,
+from run_sensitivity_v4 import (Variant, STRESS, INPUT_SCENARIOS, T_END,
                                 N_POINTS, OUT_NAME, RATIO_NAME)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Χρονοσειρές των σεναρίων εισόδου")
-    ap.add_argument("--out", default="timeseries_v4.csv")
+    ap.add_argument("--out", default=str(RESULTS_DIR / "pulse_transfer" / "timeseries_v4.csv"))
     ap.add_argument("--points", type=int, default=300,
                     help="σημεία που κρατιούνται ανά καμπύλη μετά την προσομοίωση")
     ap.add_argument("--sim-points", type=int, default=N_POINTS,

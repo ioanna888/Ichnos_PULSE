@@ -1,3 +1,23 @@
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import argparse
 import csv
 from pathlib import Path
@@ -18,7 +38,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv", type=Path, required=True)
     parser.add_argument(
-        "--out", type=Path, default=Path("python/pulse_transfer_summary.csv")
+        "--out", type=Path, default=RESULTS_DIR / "pulse_transfer" / "pulse_transfer_summary.csv"
     )
     parser.add_argument("--variant", choices=("ox", "er"), default="ox")
     args = parser.parse_args()

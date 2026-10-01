@@ -7,7 +7,7 @@
 - SHA256 του SBML: `843a41b1f46592b3451625706833de8ba45f8d8443d3a50cd661c592339422ba`
 - Source input: το `S_ox` είναι σταθερή παράμετρος.
 - Frozen sensitivity baseline: `k_clear = 0`.
-- Clearance scenarios: το `python/run_sensitivity_v4.py` παράγει κατά την εκτέλεση παράγωγο μοντέλο με `dS/dt = -k_clear*S`. Κάθε σενάριο δηλώνει τη δική του τιμή `k_clear`.
+- Clearance scenarios: το `python/sensitivity_analysis/sensitivity/run_sensitivity_v4.py` παράγει κατά την εκτέλεση παράγωγο μοντέλο με `dS/dt = -k_clear*S`. Κάθε σενάριο δηλώνει τη δική του τιμή `k_clear`.
 
 Το `integration/ox_adaptive.sbml` είναι το μόνο tracked αρχείο που επιστρέφει το `git ls-files '*ox_adaptive*'`. Κατά τον έλεγχο, το τοπικό `ox_adaptive_v2.sbml` είχε ίδιο SHA256 με το tracked αρχείο· δεν αποτελεί ξεχωριστή tracked έκδοση. Το τοπικό `ox_adaptive.sbml` είναι διαφορετικό export (`S_ox = 0`, `k_deg_TIP = 0.65 /h`) και δεν φορτώνεται από το συγκεκριμένο configuration.
 
@@ -68,7 +68,7 @@ densitometry από την αρχική εικόνα. Δεν αποκαθιστ�
 Από τη ρίζα του repository:
 
 ```bash
-python3 python/manifest_check.py
+python3 python/sensitivity_analysis/checks/manifest_check.py
 ```
 
 Ελέγχονται η διαδρομή του source SBML στο configuration, το SHA256,

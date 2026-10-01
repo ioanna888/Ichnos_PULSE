@@ -19,6 +19,26 @@ ICHNOS — διάγραμμα δόσης-απόκρισης: κύκλωμα με
 κορεσμένος. Το ένα πάνελ από μόνο του παραπλανά.
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import argparse
 import io
 import os
@@ -68,7 +88,7 @@ def norm(y):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--outdir", default="figures")
+    ap.add_argument("--outdir", default=str(FIGURES_DIR / "comparison"))
     ap.add_argument("--format", default="png", choices=["png", "pdf", "both"])
     args = ap.parse_args()
     fmts = ["png", "pdf"] if args.format == "both" else [args.format]

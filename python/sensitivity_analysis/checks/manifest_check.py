@@ -1,5 +1,25 @@
 """Verify the configured oxidative source against its manifest."""
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import hashlib
 import math
 from pathlib import Path
@@ -10,7 +30,7 @@ import xml.etree.ElementTree as ET
 
 
 def main():
-    root = Path(__file__).resolve().parent.parent
+    root = REPO_ROOT
     manifest = root / "docs/oxidative_model_manifest.md"
     config = root / "python/ichnos_config.py"
 
