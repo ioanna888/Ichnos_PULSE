@@ -210,7 +210,18 @@ def hill4(S, base, amp, K, n):
 def curve_metrics(S, y):
     p0 = [y.min(), max(y.max() - y.min(), 1e-9), float(np.median(S)), 1.5]
     try:
-        n_eff = abs(curve_fit(hill4, S, y, p0=p0, maxfev=400000)[0][3])
+        fitted, _ = curve_fit(
+            hill4,
+            S,
+            y,
+            p0=p0,
+            bounds=(
+                [-np.inf, -np.inf, 1e-12, 1e-12],
+                [np.inf, np.inf, np.inf, np.inf],
+            ),
+            maxfev=400000,
+        )
+        n_eff = float(fitted[3])
     except Exception:
         n_eff = float("nan")
     A = np.vstack([S, np.ones_like(S)]).T
