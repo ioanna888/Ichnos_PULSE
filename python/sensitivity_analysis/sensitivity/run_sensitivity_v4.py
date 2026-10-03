@@ -34,6 +34,26 @@ ICHNOS — sensitivity analysis v4
     python run_sensitivity_v4.py --quick     # λιγότερα σημεία, για δοκιμή
 """
 
+
+# Paths shared by the reorganised analysis scripts.
+from pathlib import Path
+import sys
+
+ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = ANALYSIS_DIR.parent.parent
+RESULTS_DIR = ANALYSIS_DIR / "results"
+FIGURES_DIR = ANALYSIS_DIR / "figures"
+
+# Preserve imports used by the shared tools and analysis scripts.
+for _directory in (
+    REPO_ROOT / "python",
+    ANALYSIS_DIR / "sensitivity",
+    ANALYSIS_DIR / "comparison",
+):
+    _path = str(_directory)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
 import csv
 import io
 import json
@@ -52,10 +72,25 @@ from ichnos_io import _find_id_by_name
 # ---------------------------------------------------------------------------
 # Πλέγματα στρες
 # ---------------------------------------------------------------------------
-# ox : 20-300 uM. Κάτω άκρο = παράθυρο εγκυρότητας Dacquay. Πάνω άκρο ~1.5x
-#      K_act_ox = 208, που είναι ΤΑΥΤΟΠΟΙΗΜΕΝΗ τιμή (Fig 2C, επτά δόσεις,
-#      επιβεβαιωμένη ανεξάρτητα: 217.2 / n=2.51). Πάνω από εκεί ο κορεσμός
-#      κυριαρχεί και το R2 του γραμμικού fit καταρρέει (0.95 -> 0.76).
+# # ox: πλέγμα 20–300 uM για το frozen sensitivity run με σταθερή είσοδο.
+# Η baseline τιμή K_act_ox=208 uM και n_ox=2.75 καταγράφηκε από τη
+# βαθμονόμηση του Delaunay Fig. 2C στα 5 min (7 δόσεις, 25–800 uM):
+# window: K_act=218.9, n=2.97 · unmix: K_act=198.2, n=2.54.
+# Οι μέσοι είναι 208.55 και 2.755 αντίστοιχα· στο SBML καταγράφηκαν
+# ως 208 και 2.75. Καμία μεμονωμένη μέθοδος δεν δίνει αυτές τις τιμές.
+# Το unmix διατηρείται ως frozen αποτέλεσμα: η αλλαγή του scipy.nnls
+# εμποδίζει την ακριβή αναπαραγωγή του με το τρέχον περιβάλλον.
+# Η βαθμονόμηση έγινε με k_on_ox=50/h, k_off_ox=150/h, d_x_ox=0.6/h
+# και χωρίς clearance. Στο τρέχον source SBML οι δύο τελευταίες τιμές
+# είναι 160/h και 0.5/h· τα K_act_ox/n_ox δεν ξαναπροσαρμόστηκαν
+# μετά από αυτή την αλλαγή.
+# Το fit της sensitivity report §4.1 (K_act=217.2) δεν αποτελεί
+# ανεξάρτητη επιβεβαίωση του 208: είναι κοντά στο window (218.9)
+# από το ίδιο Fig. 2C. Για την ίδια στήλη, σημεία και κανονικοποίηση,
+# το L2 norm 0.0754086 της window δίνει SSE≈0.00569, έναντι 0.00469
+# του §4.1 με πρόσθετες ελεύθερες παραμέτρους k_on_ox/k_off_ox.
+# Το παράθυρο 20–300 uM διατηρείται σταθερό για τη σύγκριση των runs·
+# πάνω από αυτό ο κορεσμός μειώνει το R² του γραμμικού fit.
 # er : αγκυρωμένο στις δόσεις του Pincus, ΟΧΙ στο K_act_er. Το K_act_er δεν
 #      είναι μετρημένο (βλ. κεφαλίδα §2). Οι 1500 και 2200 είναι.
 STRESS = {
@@ -75,8 +110,21 @@ OUT_NAME, RATIO_NAME = "Observed_Green", "Measured_Ratio_RG"
 # "id"    : περιορίζεται από δεδομένα -> τοπική παράγωγος νόμιμη (Πίνακας Α)
 # "free"  : κανένα δεδομένο δεν την περιορίζει -> εύρος, όχι παράγωγος (Β)
 TAGS = {
-    "K_act_ox":     ("id",   "Delaunay Fig 2C, 7 δόσεις· 4 seeds -> 217.2 ταυτόσημα"),
-    "n_ox":         ("id",   "Delaunay Fig 2C, ίδια προσαρμογή -> 2.51"),
+    "K_act_ox": (
+    "id",
+    "Baseline 208 uM: καταγεγραμμένος μέσος των window 218.9 και "
+    "unmix 198.2, Delaunay Fig 2C στα 5 min, σταθερό S. "
+    "Το 217.2 της §4.1 προέρχεται από fit της window, όχι από "
+    "ανεξάρτητη επιβεβαίωση του μέσου. Η βαθμονόμηση έγινε με "
+    "k_off=150, d_x=0.6· το SBML έχει πλέον 160, 0.5."
+),
+"n_ox": (
+    "id",
+    "Baseline 2.75: καταγεγραμμένος μέσος των window 2.97 και "
+    "unmix 2.54, Delaunay Fig 2C στα 5 min, σταθερό S. "
+    "Η βαθμονόμηση έγινε με k_off=150, d_x=0.6· "
+    "το SBML έχει πλέον 160, 0.5."
+),
     "k_off_ox":     ("free", "εξαρτάται από την παραδοχή εισόδου: 160 / 327 / 1822"),
     "k_on_ox":      ("free", "μη-ταυτοποιήσιμο με k_off_ox στη μόνιμη κατάσταση (MASTER §13)"),
     "d_x_ox":       ("free", "ΚΑΝΕΝΑ δεδομένο δεν το περιορίζει· χτυπά σε όριο σε κάθε fit"),
@@ -111,7 +159,7 @@ ABSOLUTE = {"d_x_ox", "d_x_er"}   # baseline 0 ή κοντά -> πολλαπλα
 
 # Δομική παραδοχή εισόδου. Το 1.777/h είναι η τιμή του κοινού fit 2B+2C.
 INPUT_SCENARIOS = [
-    ("σταθερό S (τώρα)",          0.0),
+    ("σταθερό S (frozen baseline)", 0.0),
     ("καθαρισμός, ημιζωή 60 min", 0.693),
     ("καθαρισμός, fit 2B+2C",     1.777),
 ]
@@ -162,7 +210,18 @@ def hill4(S, base, amp, K, n):
 def curve_metrics(S, y):
     p0 = [y.min(), max(y.max() - y.min(), 1e-9), float(np.median(S)), 1.5]
     try:
-        n_eff = abs(curve_fit(hill4, S, y, p0=p0, maxfev=400000)[0][3])
+        fitted, _ = curve_fit(
+            hill4,
+            S,
+            y,
+            p0=p0,
+            bounds=(
+                [-np.inf, -np.inf, 1e-12, 1e-12],
+                [np.inf, np.inf, np.inf, np.inf],
+            ),
+            maxfev=400000,
+        )
+        n_eff = float(fitted[3])
     except Exception:
         n_eff = float("nan")
     A = np.vstack([S, np.ones_like(S)]).T
@@ -302,7 +361,7 @@ def main():
             store[(vn, f"input::{lab}")] = row
             print(f"    {lab:28} " + "  ".join(f"{SHORT[k]}={row[k]:8.4f}" for k in KEY))
 
-    with open("sensitivity_v4.csv", "w", newline="", encoding="utf-8") as fh:
+    with open(RESULTS_DIR / "sensitivity" / "sensitivity_v4.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader(); w.writerows(rows)
     print(f"\nΓράφτηκαν {len(rows)} γραμμές στο sensitivity_v4.csv")
