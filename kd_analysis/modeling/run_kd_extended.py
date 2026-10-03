@@ -51,6 +51,19 @@ os.chdir(_PYTHON_DIR)
 # -------------------------------------------------------------------------
 
 from run_sensitivity_v4 import Variant, PRIMARY_T  # noqa: E402
+from run_sensitivity_v4 import (
+    Variant,
+    PRIMARY_T,
+    STRESS,
+    READOUT_TIMES,
+    T_END,
+    curve_metrics,
+    resolve,
+)
+
+import numpy as np
+
+from pi_scenarios import get_scenario
 
 from kd_config import (  # noqa: E402
     KD_GRID_NM,
@@ -74,18 +87,158 @@ OUT_CSV = os.path.join(
 # -------------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------------
-
-def run_variant(variant_name, quick=False):
+def curve_with_scenario(variant, kd_nM, scenario_name):
     """
-    Run the complete absolute-Kd grid for one model variant.
+    Same calculation as Variant.curve(), but allows the coherent
+    ER PI scenario to be applied together with the Kd override.
 
-    The only model parameter changed here is Kd_TIP_TetR.
-    All other parameters remain at the frozen model values.
+    Sensitivity code itself remains untouched.
+    """
+
+    # Frozen path: use the original implementation exactly.
+    if scenario_name == "frozen":
+        return variant.curve(
+            pname=KD_PARAMETER,
+            value=kd_nM,
+        )
+
+    scenario = get_scenario(scenario_name)
+
+    if variant.name != scenario["variant"]:
+        raise ValueError(
+            f"Scenario {scenario_name!r} is not valid "
+            f"for variant {variant.name!r}."
+        )
+
+    # Resolve the actual merged-model ids once.
+    kd_id = resolve(variant.sbml, KD_PARAMETER)
+
+    override_ids = {
+        name: resolve(variant.sbml, name)
+        for name in scenario["parameter_overrides"]
+    }
+
+    S = STRESS[variant.name]
+
+    og = {t: [] for t in READOUT_TIMES}
+    ratio = {t: [] for t in READOUT_TIMES}
+
+    tpk = []
+    adapt = []
+
+    for s in S:
+
+        variant.r.resetToOrigin()
+
+        # Kd sweep
+        variant.r[kd_id] = float(kd_nM)
+
+        # Coherent M2 parameter set
+        for name, value in scenario["parameter_overrides"].items():
+            variant.r[override_ids[name]] = float(value)
+
+        # Effective-input decay
+        variant.r["k_clear"] = float(
+            scenario["k_clear"]
+        )
+
+        # Stress dose
+        variant.r[variant.S_id] = float(s)
+
+        res = np.asarray(
+            variant.r.simulate(
+                0,
+                T_END,
+                variant.n_points,
+            )
+        )
+
+        t = res[:, 0]
+
+        for tt in READOUT_TIMES:
+            i = int(
+                np.argmin(
+                    np.abs(t - tt)
+                )
+            )
+
+            og[tt].append(res[i, 1])
+            ratio[tt].append(res[i, 2])
+
+        A = res[:, 3]
+
+        ip = int(np.argmax(A))
+
+        tpk.append(
+            float(t[ip]) * 60.0
+        )
+
+        adapt.append(
+            float(A[-1] / A[ip])
+            if A[ip] > 0
+            else float("nan")
+        )
+
+    row = {}
+
+    for tt in READOUT_TIMES:
+
+        y = np.asarray(og[tt])
+
+        ne, r2, fc = curve_metrics(
+            S,
+            y,
+        )
+
+        tag = f"{tt:g}h"
+
+        row[f"n_eff@{tag}"] = ne
+        row[f"R2@{tag}"] = r2
+        row[f"fold@{tag}"] = fc
+
+        v = np.asarray(ratio[tt])
+
+        row[f"ratio_spread@{tag}"] = (
+            float(
+                (v.max() - v.min())
+                / v.mean()
+            )
+            if v.mean() > 0
+            else float("nan")
+        )
+
+    row["t_peak_lo"] = min(tpk)
+    row["t_peak_hi"] = max(tpk)
+
+    row["adapt_lo"] = min(adapt)
+    row["adapt_hi"] = max(adapt)
+
+    return row
+
+
+def run_variant(
+    variant_name,
+    scenario_name="frozen",
+    quick=False,
+):
+    """
+    Run the complete absolute-Kd grid for one model variant/scenario.
+
+    frozen:
+        Sweep Kd_TIP_TetR while all other parameters remain at the
+        frozen SBML values.
+
+    er_m2_n4:
+        Sweep the same Kd grid while applying the coherent
+        physics-informed ER M2 n=4 scenario.
     """
 
     print()
     print("=" * 72)
-    print(f"{variant_name.upper()} — FROZEN MODEL Kd SWEEP")
+    print(
+        f"{variant_name.upper()} — "
+        f"{scenario_name.upper()} Kd SWEEP"
+    )
     print("=" * 72)
 
     variant = Variant(
@@ -93,6 +246,7 @@ def run_variant(variant_name, quick=False):
         quick=quick,
     )
 
+    # Always read the reference Kd from the original frozen model.
     sbml_reference = variant.baseline_of(KD_PARAMETER)
 
     print(
@@ -100,7 +254,7 @@ def run_variant(variant_name, quick=False):
         f"{sbml_reference:g} nM"
     )
 
-    # Guard against accidental changes to the frozen model.
+    # Guard against accidental changes to the frozen SBML.
     if abs(sbml_reference - KD_SBML_REFERENCE_NM) > 1e-12:
         raise RuntimeError(
             f"Unexpected frozen-SBML Kd for {variant_name}: "
@@ -114,18 +268,23 @@ def run_variant(variant_name, quick=False):
 
     for kd_nM in KD_GRID_NM:
 
-        row = variant.curve(
-            pname=KD_PARAMETER,
-            value=kd_nM,
+        # This helper preserves the original Variant.curve()
+        # path for scenario="frozen", while allowing the ER
+        # physics-informed parameter set to be applied together
+        # with the Kd sweep for scenario="er_m2_n4".
+        row = curve_with_scenario(
+            variant,
+            kd_nM,
+            scenario_name,
         )
 
-        # Keep multiplier for backwards compatibility and easier comparison
-        # with the old sensitivity-v4 sweep.
+        # Keep multiplier for backwards compatibility and easier
+        # comparison with the old sensitivity-v4 sweep.
         multiplier = kd_nM / sbml_reference
 
         row.update({
             "variant": variant_name,
-            "scenario": "frozen",
+            "scenario": scenario_name,
             "param": KD_PARAMETER,
             "sbml_reference_kd_nM": sbml_reference,
             "multiplier": multiplier,
@@ -151,21 +310,48 @@ def run_variant(variant_name, quick=False):
 # -------------------------------------------------------------------------
 
 def main():
-
+    
     quick = "--quick" in sys.argv
 
     rows = []
 
+    # -------------------------------------------------------------
+    # 1. Frozen reference sweeps
+    # -------------------------------------------------------------
+    # These must reproduce the previous KD analysis exactly.
     for variant_name in ("ox", "er"):
         rows.extend(
             run_variant(
                 variant_name,
+                scenario_name="frozen",
                 quick=quick,
             )
         )
 
+    # -------------------------------------------------------------
+    # 2. Physics-informed ER sweep
+    # -------------------------------------------------------------
+    # Same absolute Kd grid and same readout metrics, but with the
+    # coherent ER M2 n=4 runtime scenario.
+    #
+    # OX deliberately remains frozen because no single canonical
+    # physics-informed OX parameter set has been established.
+    rows.extend(
+        run_variant(
+            "er",
+            scenario_name="er_m2_n4",
+            quick=quick,
+        )
+    )
+
     if not rows:
-        raise RuntimeError("No Kd results were generated.")
+        raise RuntimeError(
+            "No Kd results were generated."
+        )
+
+    # -------------------------------------------------------------
+    # CSV column order
+    # -------------------------------------------------------------
 
     lead = [
         "variant",
@@ -181,6 +367,10 @@ def main():
         for key in rows[0]
         if key not in lead
     ]
+
+    # -------------------------------------------------------------
+    # Write results
+    # -------------------------------------------------------------
 
     os.makedirs(
         os.path.dirname(OUT_CSV),
@@ -202,11 +392,25 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
+    # -------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------
+
     print()
+    print("=" * 72)
+    print("KD SWEEPS COMPLETE")
+    print("=" * 72)
+
     print(
         f"Wrote {len(rows)} rows to "
         f"{os.path.normpath(OUT_CSV)}"
     )
+
+    print()
+    print("Scenarios included:")
+    print("  OX : frozen")
+    print("  ER : frozen")
+    print("  ER : er_m2_n4")
 
 
 if __name__ == "__main__":

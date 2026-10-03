@@ -10,9 +10,13 @@ for which BOTH conditions are satisfied:
     2. acceptable tandem-timer behaviour:
            ratio_spread <= ratio_threshold
 
-The thresholds are operational criteria. In particular, the microscopy
-fold threshold should be replaced by an experimentally measured LOD when
-negative-control data become available.
+Scenarios are analysed separately. Current comparisons are:
+
+    OX / frozen
+    ER / frozen
+    ER / er_m2_n4
+
+and the corresponding joint ER/OX windows.
 
 Usage
 -----
@@ -55,7 +59,6 @@ def dg_to_kd_nM(dg):
 
     where Kd in the exponential is expressed in molar units.
     """
-
     return math.exp(dg / RT_KCAL_MOL) * 1e9
 
 
@@ -63,12 +66,8 @@ def structural_estimates():
     """
     Return current dimer-based structural estimates as (label, Kd_nM).
     """
-
     return [
-        (
-            label,
-            dg_to_kd_nM(dg),
-        )
+        (label, dg_to_kd_nM(dg))
         for label, dg in STRUCTURAL_DG_KCAL_MOL.items()
     ]
 
@@ -129,6 +128,322 @@ def crossing(points, threshold, descending=True):
 
 
 # -------------------------------------------------------------------------
+# Scenario analysis
+# -------------------------------------------------------------------------
+
+def analyse_scenario(
+    rows,
+    variant,
+    scenario,
+    fold_key,
+    ratio_key,
+    fold_threshold,
+    ratio_threshold,
+):
+    """
+    Analyse one specific (variant, scenario) pair.
+
+    Returns:
+        (lower_boundary, upper_boundary)
+
+    lower_boundary:
+        timer criterion boundary, or None when the timer criterion
+        is already satisfied at the lowest simulated Kd.
+
+    upper_boundary:
+        detectability boundary.
+    """
+
+    pts = sorted(
+        (
+            (
+                float(row["kd_nM"]),
+                float(row[fold_key]),
+                float(row[ratio_key]),
+            )
+            for row in rows
+            if (
+                row["variant"] == variant
+                and row["scenario"] == scenario
+            )
+        ),
+        key=lambda x: x[0],
+    )
+
+    if not pts:
+        raise RuntimeError(
+            f"No points found for "
+            f"{variant}/{scenario}."
+        )
+
+    print()
+    print("=" * 72)
+    print(
+        f"{variant.upper()} — {scenario.upper()}"
+    )
+    print("=" * 72)
+
+    print(
+        f"{'Kd (nM)':>11}"
+        f"{'fold':>10}"
+        f"{'ratio':>12}"
+        f"{'detect':>10}"
+        f"{'timer':>10}"
+        f"{'both':>10}"
+    )
+
+    for kd, fold, ratio in pts:
+
+        detectable = fold >= fold_threshold
+        timer_ok = ratio <= ratio_threshold
+        both = detectable and timer_ok
+
+        print(
+            f"{kd:>11.4f}"
+            f"{fold:>10.4f}"
+            f"{ratio:>12.5f}"
+            f"{('yes' if detectable else 'no'):>10}"
+            f"{('yes' if timer_ok else 'no'):>10}"
+            f"{('<<<' if both else ''):>10}"
+        )
+
+    # -------------------------------------------------------------
+    # Detectability upper boundary
+    # -------------------------------------------------------------
+
+    hi = crossing(
+        [(kd, fold) for kd, fold, _ in pts],
+        fold_threshold,
+        descending=True,
+    )
+
+    # -------------------------------------------------------------
+    # Timer boundary
+    # -------------------------------------------------------------
+
+    ratio_points = [
+        (kd, ratio)
+        for kd, _, ratio in pts
+    ]
+
+    lo = crossing(
+        ratio_points,
+        ratio_threshold,
+        descending=True,
+    )
+
+    # Is the timer criterion already satisfied at the lowest Kd?
+    timer_ok_from_grid_start = (
+        pts[0][2] <= ratio_threshold
+    )
+
+    print()
+
+    if hi is not None:
+        print(
+            f"Detectability: Kd < {hi:.3f} nM"
+        )
+    else:
+        print(
+            "Detectability threshold does not cross "
+            "within the simulated grid."
+        )
+
+    if lo is not None:
+        print(
+            f"Timer criterion: Kd > {lo:.3f} nM"
+        )
+
+    elif timer_ok_from_grid_start:
+        print(
+            "Timer criterion is already satisfied at "
+            f"the lowest simulated Kd "
+            f"({pts[0][0]:g} nM)."
+        )
+
+    else:
+        print(
+            "Timer threshold does not cross "
+            "within the simulated grid."
+        )
+
+    # -------------------------------------------------------------
+    # Functional window
+    # -------------------------------------------------------------
+
+    if (
+        lo is not None
+        and hi is not None
+        and lo < hi
+    ):
+        print(
+            f"FUNCTIONAL WINDOW: "
+            f"{lo:.3f} – {hi:.3f} nM"
+        )
+
+    elif (
+        lo is not None
+        and hi is not None
+    ):
+        print(
+            "NO OVERLAP between the two criteria."
+        )
+
+    elif (
+        timer_ok_from_grid_start
+        and hi is not None
+    ):
+        print(
+            f"FUNCTIONAL WINDOW: "
+            f"Kd < {hi:.3f} nM "
+            f"(within simulated lower bound)"
+        )
+
+    elif hi is not None:
+        print(
+            f"Detectability permits Kd < {hi:.3f} nM, "
+            "but the timer criterion is not satisfied "
+            "within the simulated grid."
+        )
+
+    return lo, hi
+
+
+# -------------------------------------------------------------------------
+# Joint window
+# -------------------------------------------------------------------------
+
+def joint_window(
+    ox_window,
+    er_window,
+    er_label,
+):
+    """
+    Combine frozen OX with one ER scenario.
+    """
+
+    lows = [
+        x
+        for x in (
+            ox_window[0],
+            er_window[0],
+        )
+        if x is not None
+    ]
+
+    highs = [
+        x
+        for x in (
+            ox_window[1],
+            er_window[1],
+        )
+        if x is not None
+    ]
+
+    joint_lo = max(lows) if lows else None
+    joint_hi = min(highs) if highs else None
+
+    print()
+    print("=" * 72)
+    print(
+        f"JOINT WINDOW — OX FROZEN + ER {er_label.upper()}"
+    )
+    print("=" * 72)
+
+    if (
+        joint_lo is not None
+        and joint_hi is not None
+        and joint_lo < joint_hi
+    ):
+
+        print(
+            f"Joint window: "
+            f"{joint_lo:.3f} – {joint_hi:.3f} nM"
+        )
+
+        print(
+            f"Width: "
+            f"{joint_hi / joint_lo:.2f}x"
+        )
+
+    elif (
+        joint_lo is not None
+        and joint_hi is not None
+    ):
+
+        print(
+            "No joint functional window."
+        )
+
+        print(
+            f"Timer requires Kd > {joint_lo:.3f} nM "
+            f"while detectability requires "
+            f"Kd < {joint_hi:.3f} nM."
+        )
+
+    elif joint_hi is not None:
+
+        print(
+            f"Joint window: Kd < {joint_hi:.3f} nM"
+        )
+
+        print(
+            "No lower timer boundary occurs within "
+            "the relevant simulated scenarios."
+        )
+
+    return joint_lo, joint_hi
+
+
+# -------------------------------------------------------------------------
+# Structural comparison
+# -------------------------------------------------------------------------
+
+def print_structural_comparison(
+    joint_lo,
+    joint_hi,
+    label,
+):
+    """
+    Compare structure-derived Kd estimates with one joint window.
+    """
+
+    print()
+    print(
+        f"Structure comparison — {label}"
+    )
+
+    print(
+        f"{'Structure-derived estimate':<40}"
+        f"{'Kd (nM)':>12}"
+        f"{'inside':>10}"
+    )
+
+    for structure_label, kd in structural_estimates():
+
+        above_lower = (
+            joint_lo is None
+            or kd > joint_lo
+        )
+
+        below_upper = (
+            joint_hi is None
+            or kd < joint_hi
+        )
+
+        inside = (
+            above_lower
+            and below_upper
+        )
+
+        print(
+            f"{structure_label:<40}"
+            f"{kd:>12.3f}"
+            f"{('YES' if inside else 'no'):>10}"
+        )
+
+
+# -------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------
 
@@ -165,7 +480,9 @@ def main():
     args = parser.parse_args()
 
     fold_key = f"fold@{args.readout}"
-    ratio_key = f"ratio_spread@{args.readout}"
+    ratio_key = (
+        f"ratio_spread@{args.readout}"
+    )
 
     with open(
         CSV_PATH,
@@ -191,221 +508,149 @@ def main():
         f"Readout         : {args.readout}"
     )
 
-    windows = {}
+    # -------------------------------------------------------------
+    # Individual scenarios
+    # -------------------------------------------------------------
 
-    for variant in ("ox", "er"):
+    ox_frozen = analyse_scenario(
+        rows,
+        "ox",
+        "frozen",
+        fold_key,
+        ratio_key,
+        args.fold,
+        args.ratio,
+    )
 
-        pts = sorted(
-            (
-                (
-                    float(row["kd_nM"]),
-                    float(row[fold_key]),
-                    float(row[ratio_key]),
-                )
-                for row in rows
-                if row["variant"] == variant
-            ),
-            key=lambda x: x[0],
-        )
+    er_frozen = analyse_scenario(
+        rows,
+        "er",
+        "frozen",
+        fold_key,
+        ratio_key,
+        args.fold,
+        args.ratio,
+    )
 
-        if not pts:
-            raise RuntimeError(
-                f"No points found for variant '{variant}'."
-            )
+    er_m2 = analyse_scenario(
+        rows,
+        "er",
+        "er_m2_n4",
+        fold_key,
+        ratio_key,
+        args.fold,
+        args.ratio,
+    )
 
-        print()
-        print("=" * 72)
-        print(variant.upper())
-        print("=" * 72)
+    # -------------------------------------------------------------
+    # Joint frozen reference
+    # -------------------------------------------------------------
 
-        print(
-            f"{'Kd (nM)':>11}"
-            f"{'fold':>10}"
-            f"{'ratio':>12}"
-            f"{'detect':>10}"
-            f"{'timer':>10}"
-            f"{'both':>10}"
-        )
+    joint_frozen = joint_window(
+        ox_frozen,
+        er_frozen,
+        "frozen",
+    )
 
-        for kd, fold, ratio in pts:
+    print_structural_comparison(
+        *joint_frozen,
+        label="OX frozen + ER frozen",
+    )
 
-            detectable = fold >= args.fold
-            timer_ok = ratio <= args.ratio
-            both = detectable and timer_ok
+    # -------------------------------------------------------------
+    # Joint physics-informed ER scenario
+    # -------------------------------------------------------------
 
-            print(
-                f"{kd:>11.4f}"
-                f"{fold:>10.4f}"
-                f"{ratio:>12.5f}"
-                f"{('yes' if detectable else 'no'):>10}"
-                f"{('yes' if timer_ok else 'no'):>10}"
-                f"{('<<<' if both else ''):>10}"
-            )
+    joint_m2 = joint_window(
+        ox_frozen,
+        er_m2,
+        "er_m2_n4",
+    )
 
-        # Upper functional boundary:
-        # signal eventually becomes too weak as Kd increases.
-        hi = crossing(
-            [(kd, fold) for kd, fold, _ in pts],
-            args.fold,
-            descending=True,
-        )
+    print_structural_comparison(
+        *joint_m2,
+        label="OX frozen + ER er_m2_n4",
+    )
 
-        # Timer boundary.
-        lo = crossing(
-            [(kd, ratio) for kd, _, ratio in pts],
-            args.ratio,
-            descending=True,
-        )
+    # -------------------------------------------------------------
+    # Robustness summary
+    # -------------------------------------------------------------
 
-        windows[variant] = (
-            lo,
-            hi,
-        )
-
-        print()
-
-        if hi is not None:
-            print(
-                f"Detectability: Kd < {hi:.3f} nM"
-            )
-        else:
-            print(
-                "Detectability threshold does not cross "
-                "within the simulated grid."
-            )
-
-        if lo is not None:
-            print(
-                f"Timer criterion: Kd > {lo:.3f} nM"
-            )
-        else:
-            print(
-                "Timer threshold does not cross "
-                "within the simulated grid."
-            )
-
-        if (
-            lo is not None
-            and hi is not None
-            and lo < hi
-        ):
-            print(
-                f"FUNCTIONAL WINDOW: "
-                f"{lo:.3f} – {hi:.3f} nM"
-            )
-
-        elif (
-            lo is not None
-            and hi is not None
-        ):
-            print(
-                "NO OVERLAP between the two criteria."
-            )
-
-        elif hi is not None:
-            print(
-                f"FUNCTIONAL WINDOW: Kd < {hi:.3f} nM"
-            )
-
-    # ------------------------------------------------------------------
-    # Joint ER/OX window
-    # ------------------------------------------------------------------
-
-    lows = [
-        window[0]
-        for window in windows.values()
-        if window[0] is not None
-    ]
-
-    highs = [
-        window[1]
-        for window in windows.values()
-        if window[1] is not None
-    ]
-
-    joint_lo = max(lows) if lows else None
-    joint_hi = min(highs) if highs else None
+       # -------------------------------------------------------------
+    # Robustness summary
+    # -------------------------------------------------------------
 
     print()
     print("=" * 72)
-    print(
-        "JOINT WINDOW "
-        "(same Kd_TIP_TetR for ER and OX)"
-    )
+    print("KD ROBUSTNESS SUMMARY")
     print("=" * 72)
 
+    print("Frozen joint window:")
+
     if (
-        joint_lo is not None
-        and joint_hi is not None
-        and joint_lo < joint_hi
+        joint_frozen[0] is not None
+        and joint_frozen[1] is not None
+        and joint_frozen[0] < joint_frozen[1]
     ):
-
         print(
-            f"Joint window: "
-            f"{joint_lo:.3f} – {joint_hi:.3f} nM"
-        )
-
-        print(
-            f"Width: {joint_hi / joint_lo:.2f}x"
+            f"  {joint_frozen[0]:.3f} – "
+            f"{joint_frozen[1]:.3f} nM"
         )
 
     elif (
-        joint_lo is not None
-        and joint_hi is not None
+        joint_frozen[0] is not None
+        and joint_frozen[1] is not None
     ):
-
+        print("  NO FEASIBLE WINDOW")
         print(
-            "No joint functional window."
+            f"  timer requires Kd > "
+            f"{joint_frozen[0]:.3f} nM"
+        )
+        print(
+            f"  detectability requires Kd < "
+            f"{joint_frozen[1]:.3f} nM"
         )
 
+    elif joint_frozen[1] is not None:
         print(
-            f"Timer requires Kd > {joint_lo:.3f} nM "
-            f"while detectability requires "
-            f"Kd < {joint_hi:.3f} nM."
+            f"  Kd < {joint_frozen[1]:.3f} nM"
         )
-
-    elif joint_hi is not None:
-
-        print(
-            f"Joint window: Kd < {joint_hi:.3f} nM"
-        )
-
-    # ------------------------------------------------------------------
-    # Compare with current structural estimates
-    # ------------------------------------------------------------------
 
     print()
-    print(
-        f"{'Structure-derived estimate':<40}"
-        f"{'Kd (nM)':>12}"
-        f"{'inside':>10}"
-    )
 
-    for label, kd in structural_estimates():
+    print("PI ER joint window:")
 
-        above_lower = (
-            joint_lo is None
-            or kd > joint_lo
-        )
-
-        below_upper = (
-            joint_hi is None
-            or kd < joint_hi
-        )
-
-        inside = (
-            above_lower
-            and below_upper
-        )
-
+    if (
+        joint_m2[0] is not None
+        and joint_m2[1] is not None
+        and joint_m2[0] < joint_m2[1]
+    ):
         print(
-            f"{label:<40}"
-            f"{kd:>12.3f}"
-            f"{('YES' if inside else 'no'):>10}"
+            f"  {joint_m2[0]:.3f} – "
+            f"{joint_m2[1]:.3f} nM"
+        )
+
+    elif (
+        joint_m2[0] is not None
+        and joint_m2[1] is not None
+    ):
+        print("  NO FEASIBLE WINDOW")
+        print(
+            f"  timer requires Kd > "
+            f"{joint_m2[0]:.3f} nM"
+        )
+        print(
+            f"  detectability requires Kd < "
+            f"{joint_m2[1]:.3f} nM"
+        )
+
+    elif joint_m2[1] is not None:
+        print(
+            f"  Kd < {joint_m2[1]:.3f} nM"
         )
 
 
 if __name__ == "__main__":
     main()
 
-    
+  
